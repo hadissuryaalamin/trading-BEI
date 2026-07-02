@@ -1,0 +1,45 @@
+# Cross-sectional transformer: attention across stocks each day.
+experiment_name: cross_sectional
+seed: 42
+
+data:
+  panel: data/processed/panel.parquet
+  universe: all
+  min_dollar_volume: 0
+  start: 2022-01-03
+  end: 2026-07-02
+
+split:
+  train_end: 2024-12-31
+  val_end: 2025-06-30
+
+features:
+  columns: [log_return, overnight_return, hl_range, log_volume, log_value, turnover, foreign_flow_ratio]
+  normalize: cross_sectional_zscore
+
+window:
+  lookback: 60
+  horizon: 1
+
+model:
+  name: cross_sectional
+  d_model: 64
+  n_heads: 4
+  temporal_layers: 2         # attention over the 60 days
+  cross_layers: 2            # attention across stocks
+  dim_ff: 128
+  dropout: 0.1
+  pooling: last
+
+train:
+  epochs: 40
+  batch_size: 1              # one day per step (all stocks that day)
+  lr: 0.0003
+  weight_decay: 0.00001
+  early_stop_patience: 8
+  objective: regression
+  transaction_cost_bps: 20
+
+portfolio:
+  strategy: long_only
+  top_n: 10

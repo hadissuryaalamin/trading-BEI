@@ -153,3 +153,71 @@ def _metrics(d: pd.DataFrame, ann: int = 252) -> dict:
         "avg_turnover": float(d["turnover"].mean()),
         "n_days": int(len(r)),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Cross-sectional variant (one day per step; loss over that day's stocks)
+# --------------------------------------------------------------------------- #
+def train_cs(model, train_ds, val_ds, cfg, device="cpu"):
+    """Train the cross-sectional model. Each step = one trading day."""
+    import random
+    import torch
+    import torch.nn as nn
+
+    opt = torch.optim.Adam(model.parameters(), lr=cfg.get("lr", 3e-4),
+                           weight_decay=cfg.get("weight_decay", 1e-5))
+    loss_fn = nn.MSELoss()
+    patience = cfg.get("early_stop_patience", 8)
+    best_val, best_state, bad = float("inf"), None, 0
+    order = list(range(len(train_ds)))
+
+    for epoch in range(cfg.get("epochs", 50)):
+        model.train()
+        random.shuffle(order)
+        tr = n = 0
+        for i in order:
+            X, y, _, _ = train_ds[i]
+            X, y = X.to(device), y.to(device)
+            opt.zero_grad()
+            loss = loss_fn(model(X), y)
+            loss.backward()
+            opt.step()
+            tr += loss.item(); n += 1
+        val = _eval_loss_cs(model, val_ds, loss_fn, device)
+        print(f"epoch {epoch:03d} | train {tr/max(n,1):.6f} | val {val:.6f}")
+        if val < best_val - 1e-7:
+            best_val, bad = val, 0
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        else:
+            bad += 1
+            if bad >= patience:
+                print(f"early stop at epoch {epoch} (best val {best_val:.6f})")
+                break
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    return model
+
+
+def _eval_loss_cs(model, ds, loss_fn, device):
+    import torch
+    model.eval()
+    tot = n = 0
+    with torch.no_grad():
+        for i in range(len(ds)):
+            X, y, _, _ = ds[i]
+            tot += loss_fn(model(X.to(device)), y.to(device)).item(); n += 1
+    return tot / max(n, 1)
+
+
+def predict_scores_cs(model, ds, device="cpu") -> pd.DataFrame:
+    """Run the cross-sectional model day by day -> DataFrame(date,ticker,score,fwd_return)."""
+    import torch
+    rows = []
+    model.eval()
+    with torch.no_grad():
+        for i in range(len(ds)):
+            X, y, tickers, date = ds[i]
+            s = model(X.to(device)).cpu().numpy()
+            for tk, sc, yi in zip(tickers, s, y.numpy()):
+                rows.append((date, tk, float(sc), float(yi)))
+    return pd.DataFrame(rows, columns=["date", "ticker", "score", "fwd_return"])
