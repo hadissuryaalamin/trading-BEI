@@ -6,12 +6,12 @@ data:
   panel: data/processed/panel.parquet
   universe: all            # all | lq45 | idx80 | custom
   min_dollar_volume: 0     # set >0 to filter illiquid names
-  start: 2020-07-01
-  end: 2025-06-30
+  start: 2022-01-03
+  end: 2026-07-02
 
 split:                     # walk-forward, by date (no random split)
-  train_end: 2023-12-31
-  val_end: 2024-06-30
+  train_end: 2024-12-31
+  val_end: 2025-06-30
   # test = val_end .. data.end
 
 features:
@@ -37,10 +37,10 @@ train:
   lr: 0.0003
   weight_decay: 0.00001
   early_stop_patience: 8
-  objective: sharpe          # sharpe | mean_return
+  objective: regression      # regression (predict next-day return, MSE)
   turnover_penalty: 0.001
   transaction_cost_bps: 20   # round-trip cost assumption for IDX
 
 portfolio:
-  constraint: dollar_neutral # dollar_neutral | long_only
-  max_leverage: 1.0
+  strategy: long_only        # buy top_n each day, sell next day
+  top_n: 10                  # number of stocks to hold daily

@@ -10,6 +10,7 @@ torch>=2.2
 # Scraping IDX
 requests>=2.31
 tenacity>=8.2          # retry/backoff for the scraper
+curl_cffi>=0.7          # Cloudflare-bypassing HTTP (Chrome TLS impersonation)
 python-dateutil>=2.9
 
 # Config / experiment
