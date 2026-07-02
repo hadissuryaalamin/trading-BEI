@@ -1,0 +1,2 @@
+# Scraped IDX daily stock-summary files land here (one file per trading day).
+# Gitignored — regenerate with: python -m scraper.idx_scraper

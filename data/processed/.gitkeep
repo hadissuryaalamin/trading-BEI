@@ -1,0 +1,2 @@
+# Cleaned panel data (panel.parquet) built from data/raw.
+# Gitignored — regenerate with: python -m scraper.build_panel

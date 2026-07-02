@@ -1,0 +1,46 @@
+# Baseline transformer trading-policy experiment.
+experiment_name: transformer_base
+seed: 42
+
+data:
+  panel: data/processed/panel.parquet
+  universe: all            # all | lq45 | idx80 | custom
+  min_dollar_volume: 0     # set >0 to filter illiquid names
+  start: 2020-07-01
+  end: 2025-06-30
+
+split:                     # walk-forward, by date (no random split)
+  train_end: 2023-12-31
+  val_end: 2024-06-30
+  # test = val_end .. data.end
+
+features:
+  columns: [log_return, log_volume, hl_range, foreign_flow_ratio]
+  normalize: cross_sectional_zscore
+
+window:
+  lookback: 60
+  horizon: 1
+
+model:
+  name: transformer
+  d_model: 64
+  n_heads: 4
+  n_layers: 3
+  dim_ff: 128
+  dropout: 0.1
+  pooling: last
+
+train:
+  epochs: 50
+  batch_size: 512
+  lr: 0.0003
+  weight_decay: 0.00001
+  early_stop_patience: 8
+  objective: sharpe          # sharpe | mean_return
+  turnover_penalty: 0.001
+  transaction_cost_bps: 20   # round-trip cost assumption for IDX
+
+portfolio:
+  constraint: dollar_neutral # dollar_neutral | long_only
+  max_leverage: 1.0

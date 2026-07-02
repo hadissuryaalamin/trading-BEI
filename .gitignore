@@ -1,0 +1,50 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.ipynb_checkpoints/
+
+# ---- Virtual envs ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Env / secrets ----
+.env
+.env.*
+*.key
+
+# ---- Data (large / regenerable) ----
+data/raw/**
+data/processed/**
+data/interim/**
+!data/**/.gitkeep
+
+# ---- Model artifacts & experiment outputs ----
+models/checkpoints/**
+results/**
+logs/**
+runs/            # tensorboard
+wandb/
+*.pt
+*.pth
+*.ckpt
+*.onnx
+!**/.gitkeep
+
+# ---- Notebooks output cruft ----
+*.nbconvert.ipynb
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
