@@ -1,8 +1,12 @@
 """CLI: config -> data -> features -> splits -> model -> train -> backtest -> save.
 
-Supports two model types via cfg["model"]["name"]:
-    transformer     -> per-stock baseline (one sample = one stock-day)
-    cross_sectional -> attention across stocks (one sample = one day)
+Two independent switches:
+  cfg["model"]["name"]     : transformer (per-stock)  |  cross_sectional (attends across stocks)
+  cfg["train"]["objective"]: regression (MSE on next-day return)
+                             sharpe     (DLSA-style: optimize long-only portfolio Sharpe)
+
+The 'sharpe' objective always batches by day (needs the full cross-section to
+form a portfolio), so it uses the per-day dataset regardless of model type.
 
 Usage
 -----
@@ -22,6 +26,13 @@ from .utils import load_config, set_seed
 from . import train_test as tt
 
 
+def _collate_windows(b):
+    import torch
+    return (torch.stack([r[0] for r in b]),
+            torch.stack([r[1] for r in b]),
+            [r[2] for r in b])
+
+
 def _load_features(cfg):
     dcfg, wcfg = cfg["data"], cfg["window"]
     panel = pd.read_parquet(dcfg["panel"])
@@ -37,6 +48,24 @@ def _load_features(cfg):
     return feats
 
 
+def _build_model(model_name, mcfg, lookback, device):
+    import torch  # noqa: F401
+    if model_name == "cross_sectional":
+        from models.cross_sectional import CrossSectionalModel
+        return CrossSectionalModel(
+            n_features=len(FEATURE_COLUMNS), d_model=mcfg["d_model"], n_heads=mcfg["n_heads"],
+            temporal_layers=mcfg.get("temporal_layers", 2), cross_layers=mcfg.get("cross_layers", 2),
+            dim_ff=mcfg["dim_ff"], dropout=mcfg["dropout"], lookback=lookback,
+            pooling=mcfg.get("pooling", "last"), output="linear",
+        )
+    from models.transformer import TransformerPolicy
+    return TransformerPolicy(
+        n_features=len(FEATURE_COLUMNS), d_model=mcfg["d_model"], n_heads=mcfg["n_heads"],
+        n_layers=mcfg.get("n_layers", 3), dim_ff=mcfg["dim_ff"], dropout=mcfg["dropout"],
+        lookback=lookback, pooling=mcfg.get("pooling", "last"), output="linear",
+    )
+
+
 def run(config_path: str) -> dict:
     cfg = load_config(config_path)
     set_seed(cfg.get("seed", 42))
@@ -46,68 +75,62 @@ def run(config_path: str) -> dict:
     print(f"device: {device}")
     name = cfg.get("experiment_name", "run")
     model_name = cfg["model"].get("name", "transformer")
+    objective = cfg["train"].get("objective", "regression")
     scfg, wcfg, mcfg = cfg["split"], cfg["window"], cfg["model"]
     lookback = wcfg["lookback"]
     feats = _load_features(cfg)
-    n = lambda d: pd.Timestamp(d) + pd.Timedelta(days=1)
+    nxt = lambda d: pd.Timestamp(d) + pd.Timedelta(days=1)
 
-    if model_name == "cross_sectional":
+    # 'sharpe' needs the daily cross-section; cross_sectional model also does.
+    per_day = objective == "sharpe" or model_name == "cross_sectional"
+    print(f"model={model_name} | objective={objective} | per_day_batching={per_day}")
+
+    model = _build_model(model_name, mcfg, lookback, device).to(device)
+    print(f"model params: {sum(p.numel() for p in model.parameters()):,}")
+
+    if per_day:
         from .dataset_cs import IDXCrossSectionalDataset as DS
-        from models.cross_sectional import CrossSectionalModel
         tr = DS(feats, lookback, end=scfg["train_end"])
-        va = DS(feats, lookback, start=n(scfg["train_end"]), end=scfg["val_end"])
-        te = DS(feats, lookback, start=n(scfg["val_end"]), end=cfg["data"].get("end"))
+        va = DS(feats, lookback, start=nxt(scfg["train_end"]), end=scfg["val_end"])
+        te = DS(feats, lookback, start=nxt(scfg["val_end"]), end=cfg["data"].get("end"))
         print(f"days: train={len(tr)} val={len(va)} test={len(te)}")
-        model = CrossSectionalModel(
-            n_features=len(FEATURE_COLUMNS), d_model=mcfg["d_model"], n_heads=mcfg["n_heads"],
-            temporal_layers=mcfg.get("temporal_layers", 2), cross_layers=mcfg.get("cross_layers", 2),
-            dim_ff=mcfg["dim_ff"], dropout=mcfg["dropout"], lookback=lookback,
-            pooling=mcfg.get("pooling", "last"), output="linear",
-        ).to(device)
-        print(f"model params: {sum(p.numel() for p in model.parameters()):,}")
-        tt.train_cs(model, tr, va, cfg["train"], device=device)
+        if objective == "sharpe":
+            tt.train_dlsa(model, tr, va, cfg["train"], device=device)
+        else:
+            tt.train_cs(model, tr, va, cfg["train"], device=device)
         scores = tt.predict_scores_cs(model, te, device=device)
     else:
         from torch.utils.data import DataLoader
         from .dataset import IDXWindowDataset
-        from models.transformer import TransformerPolicy
         tr = IDXWindowDataset(feats, lookback, end=scfg["train_end"])
-        va = IDXWindowDataset(feats, lookback, start=n(scfg["train_end"]), end=scfg["val_end"])
-        te = IDXWindowDataset(feats, lookback, start=n(scfg["val_end"]), end=cfg["data"].get("end"))
+        va = IDXWindowDataset(feats, lookback, start=nxt(scfg["train_end"]), end=scfg["val_end"])
+        te = IDXWindowDataset(feats, lookback, start=nxt(scfg["val_end"]), end=cfg["data"].get("end"))
         print(f"samples: train={len(tr):,} val={len(va):,} test={len(te):,}")
-        def collate(b):
-            return torch.stack([r[0] for r in b]), torch.stack([r[1] for r in b]), [r[2] for r in b]
         bs = cfg["train"]["batch_size"]
-        model = TransformerPolicy(
-            n_features=len(FEATURE_COLUMNS), d_model=mcfg["d_model"], n_heads=mcfg["n_heads"],
-            n_layers=mcfg.get("n_layers", 3), dim_ff=mcfg["dim_ff"], dropout=mcfg["dropout"],
-            lookback=lookback, pooling=mcfg.get("pooling", "last"), output="linear",
-        ).to(device)
-        print(f"model params: {sum(p.numel() for p in model.parameters()):,}")
         pin = device == "cuda"
-        nw = cfg["train"].get("num_workers", 4)
+        nw = cfg["train"].get("num_workers", 0)
         tt.train(model,
-                 DataLoader(tr, batch_size=bs, shuffle=True, collate_fn=collate,
+                 DataLoader(tr, batch_size=bs, shuffle=True, collate_fn=_collate_windows,
                             num_workers=nw, pin_memory=pin),
-                 DataLoader(va, batch_size=bs, shuffle=False, collate_fn=collate,
+                 DataLoader(va, batch_size=bs, shuffle=False, collate_fn=_collate_windows,
                             num_workers=nw, pin_memory=pin),
                  cfg["train"], device=device)
         scores = tt.predict_scores(model, te, device=device, batch_size=bs)
 
-    # --- backtest (shared) ---
+    # --- backtest (shared): rank by score, buy top-N (which are 'going up') ---
     pcfg = cfg.get("portfolio", {})
     metrics, daily = tt.backtest_long_only(
         scores, top_n=pcfg.get("top_n", 10),
         cost_bps=cfg["train"].get("transaction_cost_bps", 20),
     )
-    print(f"\n=== BACKTEST [{model_name}] (test, long-only top-{pcfg.get('top_n',10)}) ===")
+    print(f"\n=== BACKTEST [{model_name}/{objective}] (test, long-only top-{pcfg.get('top_n',10)}) ===")
     for k, v in metrics.items():
         print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")
 
     # --- save ---
     out = Path("results") / name
     out.mkdir(parents=True, exist_ok=True)
-    (out / "metrics.json").write_text(json.dumps({**metrics, "model": model_name}, indent=2))
+    (out / "metrics.json").write_text(json.dumps({**metrics, "model": model_name, "objective": objective}, indent=2))
     daily.to_csv(out / "daily_returns.csv", index=False)
     scores.to_csv(out / "test_scores.csv", index=False)
     Path("models/checkpoints").mkdir(parents=True, exist_ok=True)

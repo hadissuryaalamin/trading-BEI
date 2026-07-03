@@ -37,8 +37,10 @@ train:
   lr: 0.0003
   weight_decay: 0.00001
   early_stop_patience: 8
-  objective: regression
+  objective: sharpe
   transaction_cost_bps: 20
+  days_per_step: 32          # (sharpe) days per gradient step
+  softmax_temp: 1.0          # (sharpe) <1 concentrates weight on top names
 
 portfolio:
   strategy: long_only

@@ -221,3 +221,82 @@ def predict_scores_cs(model, ds, device="cpu") -> pd.DataFrame:
             for tk, sc, yi in zip(tickers, s, y.numpy()):
                 rows.append((date, tk, float(sc), float(yi)))
     return pd.DataFrame(rows, columns=["date", "ticker", "score", "fwd_return"])
+
+
+# --------------------------------------------------------------------------- #
+# DLSA-style training: optimize portfolio Sharpe end-to-end (long-only)
+# --------------------------------------------------------------------------- #
+def train_dlsa(model, train_ds, val_ds, cfg, device="cpu"):
+    """End-to-end economic objective (DLSA-style), long-only.
+
+    Each day: model scores every stock -> softmax over the cross-section gives
+    long-only weights (>=0, sum to 1) -> daily portfolio return. We optimize the
+    NEGATIVE Sharpe of those daily returns over a mini-batch of days (so the
+    score is trained to rank up-movers, not to predict exact returns).
+
+    train_ds / val_ds are IDXCrossSectionalDataset (per-day).
+    """
+    import random
+    import numpy as np
+    import torch
+
+    opt = torch.optim.Adam(model.parameters(), lr=cfg.get("lr", 3e-4),
+                           weight_decay=cfg.get("weight_decay", 1e-5))
+    K = cfg.get("days_per_step", 32)
+    temp = cfg.get("softmax_temp", 1.0)
+    ann = 252
+    patience = cfg.get("early_stop_patience", 8)
+    best, best_state, bad = -1e18, None, 0
+    order = list(range(len(train_ds)))
+
+    for epoch in range(cfg.get("epochs", 50)):
+        model.train()
+        random.shuffle(order)
+        losses = []
+        for c in range(0, len(order), K):
+            chunk = order[c:c + K]
+            rets = []
+            for i in chunk:
+                X, y, _, _ = train_ds[i]
+                s = model(X.to(device))                       # (N,)
+                w = torch.softmax(s / temp, dim=0)            # long-only weights
+                simple = torch.expm1(y.to(device))            # log -> simple return
+                rets.append((w * simple).sum())
+            r = torch.stack(rets)
+            sharpe = r.mean() / (r.std() + 1e-6) * (ann ** 0.5)
+            loss = -sharpe
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            losses.append(loss.item())
+        val_sharpe = _eval_sharpe(model, val_ds, device, temp, ann)
+        print(f"epoch {epoch:03d} | train_loss {np.mean(losses):.4f} | val_sharpe {val_sharpe:.4f}")
+        if val_sharpe > best + 1e-6:
+            best, bad = val_sharpe, 0
+            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        else:
+            bad += 1
+            if bad >= patience:
+                print(f"early stop at epoch {epoch} (best val_sharpe {best:.4f})")
+                break
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    return model
+
+
+def _eval_sharpe(model, ds, device, temp=1.0, ann=252):
+    import numpy as np
+    import torch
+    model.eval()
+    rets = []
+    with torch.no_grad():
+        for i in range(len(ds)):
+            X, y, _, _ = ds[i]
+            s = model(X.to(device))
+            w = torch.softmax(s / temp, dim=0)
+            simple = torch.expm1(y.to(device))
+            rets.append(float((w * simple).sum()))
+    r = np.asarray(rets)
+    if len(r) == 0 or r.std() == 0:
+        return 0.0
+    return float(r.mean() / r.std() * np.sqrt(ann))
