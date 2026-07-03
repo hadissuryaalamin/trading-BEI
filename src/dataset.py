@@ -5,9 +5,11 @@ label being the forward return at t (already computed in preprocess as target).
 
 Design
 ------
-- Per ticker, build a contiguous time-indexed matrix and slide a window of
-  length `lookback` ending at each day t. A sample is valid only if the full
-  lookback window has no gaps and the target at t is present.
+- Per ticker, slide a window of length `lookback` over the ticker's own trading
+  rows ending at each day t. The window is the stock's trading HISTORY (it may
+  span a suspension); what is strict is the LABEL: preprocess only defines the
+  target when t+1 is the very next exchange day and the stock trades on it, and
+  `valid_day` gates t itself (traded + liquidity screen).
 - Splits are by TIME (walk-forward): a sample belongs to a split by the date of
   its last window step t. This prevents any train/test leakage.
 - No cross-asset batching tricks needed: each (ticker, t) is an independent
@@ -33,7 +35,13 @@ class IDXWindowDataset(Dataset):
     start, end : optional date bounds (inclusive) on the window's LAST day t,
         used to carve walk-forward train/val/test splits
     require_target : if True, drop samples whose forward return is NaN
-        (e.g. the final day). Set False for pure inference.
+        (gap/suspension/stale next day, or the final day). Set False for pure
+        inference.
+
+    If a `valid_day` column is present (set by preprocess + market.apply_universe),
+    samples are only emitted where it is True: the stock traded that day and
+    passes the liquidity screen. The lookback window itself may span less-liquid
+    history -- what matters is that the DECISION day is tradable.
     """
 
     def __init__(
@@ -63,6 +71,11 @@ class IDXWindowDataset(Dataset):
             X = block[self.feature_cols].to_numpy(dtype=np.float32)
             y = block[TARGET_COLUMN].to_numpy(dtype=np.float32)
             dates = block["date"].to_numpy()
+            valid = (
+                block["valid_day"].to_numpy(dtype=bool)
+                if "valid_day" in block.columns
+                else np.ones(len(block), dtype=bool)
+            )
             if len(block) < lookback:
                 continue
             ti = len(self._tickers)
@@ -71,6 +84,8 @@ class IDXWindowDataset(Dataset):
             self._y.append(y)
             self._dates.append(dates)
             for t in range(lookback - 1, len(block)):
+                if not valid[t]:
+                    continue
                 d = pd.Timestamp(dates[t])
                 if start is not None and d < start:
                     continue

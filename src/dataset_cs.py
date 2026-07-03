@@ -49,9 +49,16 @@ class IDXCrossSectionalDataset(Dataset):
             X = block[self.feature_cols].to_numpy(dtype=np.float32)
             y = block[TARGET_COLUMN].to_numpy(dtype=np.float32)
             dates = block["date"].to_numpy()
+            valid = (
+                block["valid_day"].to_numpy(dtype=bool)
+                if "valid_day" in block.columns
+                else np.ones(len(block), dtype=bool)
+            )
             ti = len(self._tickers)
             self._tickers.append(ticker); self._X.append(X); self._y.append(y); self._dates.append(dates)
             for t in range(lookback - 1, len(block)):
+                if not valid[t]:
+                    continue
                 d = pd.Timestamp(dates[t])
                 if start is not None and d < start:
                     continue

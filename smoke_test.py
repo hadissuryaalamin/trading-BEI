@@ -61,7 +61,7 @@ def main() -> None:
              cfg)
 
     scores = tt.predict_scores(model, te, batch_size=512)
-    metrics, _ = tt.backtest_long_only(scores, top_n=args.top_n, cost_bps=20)
+    metrics, _ = tt.backtest_long_only(scores, top_n=args.top_n)
     print("\n=== BACKTEST (test, long-only top-N; model barely trained) ===")
     for k, v in metrics.items():
         print(f"  {k}: {v:.4f}" if isinstance(v, float) else f"  {k}: {v}")

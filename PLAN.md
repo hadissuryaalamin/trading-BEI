@@ -160,6 +160,40 @@ Yang **dipertahankan** dari kerangka DLSA:
 ## Pertanyaan terbuka
 
 - Konfirmasi endpoint & nama field IDX terkini (bisa berubah).
-- Perlakuan aksi korporasi (stock split, dividen) → penyesuaian harga?
-- Threshold likuiditas untuk membuang saham tidur (meski universe = semua).
-- Handling survivorship bias (emiten delisting selama 5 tahun).
+- ~~Perlakuan aksi korporasi (stock split, dividen) → penyesuaian harga?~~
+  **Selesai (split):** return harian pakai `close / Previous`; IDX sudah
+  menyesuaikan `Previous` di ex-date, jadi split tidak jadi return palsu
+  (lihat `preprocess.adjusted_log_return`). Dividen tunai TIDAK disesuaikan
+  (data ringkasan tidak memuat dividen) → return = price return.
+- ~~Threshold likuiditas~~ **Selesai:** blok config `universe.min_value_idr`
+  (median nilai transaksi 20 hari ≥ ambang, kausal) di `src/market.py`.
+- ~~Handling survivorship bias~~ **Selesai:** panel dari snapshot harian sudah
+  memuat emiten yang belakangan delisting; backtest menulis turun posisi yang
+  hilang dari panel (`portfolio.delist_after/delist_return`).
+
+## Update 2026-07-04 — lapisan realisme long-only
+
+Temuan review: backtest lama menggelembungkan hasil. Perbaikan yang sudah
+diimplementasikan (lihat juga `tests/`):
+
+1. **Aksi korporasi**: return via `Previous` (adjusted), path log-price
+   ter-adjust untuk momentum & target. Sebelumnya split 1:10 terbaca -90%.
+2. **Gap/suspensi**: target hanya terdefinisi bila t+1 adalah hari bursa
+   PERSIS berikutnya dan sahamnya benar-benar ditransaksikan; sampel hari-t
+   butuh `valid_day` (traded + lolos screen likuiditas).
+3. **Backtest stateful** (`src/backtest.py`): tidak bisa beli saham yang
+   mentok ARA (offer=0), tidak bisa jual yang mentok ARB (bid=0) — posisi
+   "nyangkut" tetap dipegang dan menanggung return berikutnya; biaya beli/jual
+   terpisah (komisi + pajak jual 0,1%); kas idle dapat bunga `rf_annual`;
+   emiten yang hilang dari panel ditulis turun.
+4. **Objective selaras dengan yang ditradingkan** (`train_dlsa`): blok
+   hari BERURUTAN, turnover dikenai biaya di dalam loss (net Sharpe, excess
+   rf); `softmax_temp` 0.1 supaya bobot terkonsentrasi seperti buku top-N;
+   slot kas opsional (`allow_cash`); early stop pakai net Sharpe aturan top-N
+   di validasi, bukan portofolio softmax.
+5. **Walk-forward beneran**: `split.mode: walk_forward` — retrain per fold
+   (default 6 bulan), skor test dirangkai lintas fold sebelum backtest.
+6. **Metrik**: Sharpe dihitung EXCESS rf (~5,5%); plus alpha/beta/IR terhadap
+   proxy IHSG (long-only didominasi beta).
+7. **Anti look-ahead**: unit test di `tests/test_preprocess.py` (mutasi data
+   masa depan tidak boleh mengubah fitur ≤ t).

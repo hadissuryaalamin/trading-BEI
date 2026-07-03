@@ -4,15 +4,22 @@ seed: 42
 
 data:
   panel: data/processed/panel.parquet
-  universe: all            # all | lq45 | idx80 | custom
-  min_dollar_volume: 0     # set >0 to filter illiquid names
-  start: 2022-01-03
+  start: 2020-07-01
   end: 2026-07-02
 
-split:                     # walk-forward, by date (no random split)
-  train_end: 2024-12-31
-  val_end: 2025-06-30
-  # test = val_end .. data.end
+universe:                    # causal liquidity screen (market.apply_universe)
+  min_value_idr: 1_000_000_000   # trailing 20d MEDIAN daily traded value >= 1B IDR
+  window: 20
+
+split:
+  mode: walk_forward         # rolling retrains; test scores stitched across folds
+  walk_forward:
+    test_start: 2024-07-01   # 4 folds of 6 months -> 2y stitched out-of-sample
+    step_months: 6
+    val_months: 6
+  # mode: single             # alternative: one split
+  # train_end: 2024-12-31
+  # val_end: 2025-06-30
 
 features:
   # Ablation-driven: pick economic groups (see ABLATION_PLAN.md / preprocess.FEATURE_GROUPS).
@@ -39,12 +46,18 @@ train:
   lr: 0.0003
   weight_decay: 0.00001
   early_stop_patience: 8
-  objective: sharpe          # sharpe (DLSA-style: max long-only portfolio Sharpe) | regression
-  turnover_penalty: 0.001
-  transaction_cost_bps: 20
-  days_per_step: 32          # (sharpe) days per gradient step
-  softmax_temp: 1.0          # (sharpe) <1 concentrates weight on top names   # round-trip cost assumption for IDX
+  objective: sharpe          # sharpe (DLSA-style: max long-only NET Sharpe) | regression
+  days_per_step: 32          # (sharpe) CONSECUTIVE days per gradient step
+  softmax_temp: 0.1          # (sharpe) concentrate weights like the traded top-N book
+  allow_cash: true           # (sharpe) extra zero logit = retreat to cash at rf
+
+costs:                       # IDX round trip: ~15bps commission/side + 10bps sell tax
+  buy_bps: 15
+  sell_bps: 25
+  rf_annual: 0.055
 
 portfolio:
-  strategy: long_only        # buy top_n each day, sell next day
-  top_n: 10                  # number of stocks to hold daily
+  strategy: long_only        # buy top_n each day at the close, rebalance daily
+  top_n: 10
+  delist_after: 20
+  delist_return: -0.5

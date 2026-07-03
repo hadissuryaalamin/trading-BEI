@@ -4,14 +4,19 @@ seed: 42
 
 data:
   panel: data/processed/panel.parquet
-  universe: all
-  min_dollar_volume: 0
-  start: 2022-01-03
+  start: 2020-07-01
   end: 2026-07-02
 
+universe:                    # causal liquidity screen (market.apply_universe)
+  min_value_idr: 1_000_000_000   # trailing 20d MEDIAN daily traded value >= 1B IDR
+  window: 20
+
 split:
-  train_end: 2024-12-31
-  val_end: 2025-06-30
+  mode: walk_forward
+  walk_forward:
+    test_start: 2024-07-01   # 4 folds of 6 months -> 2y stitched out-of-sample
+    step_months: 6
+    val_months: 6
 
 features:
   # Ablation-driven: pick economic groups (see ABLATION_PLAN.md / preprocess.FEATURE_GROUPS).
@@ -39,11 +44,18 @@ train:
   lr: 0.0003
   weight_decay: 0.00001
   early_stop_patience: 8
-  objective: sharpe
-  transaction_cost_bps: 20
-  days_per_step: 32          # (sharpe) days per gradient step
-  softmax_temp: 1.0          # (sharpe) <1 concentrates weight on top names
+  objective: sharpe          # DLSA-style: maximize long-only NET portfolio Sharpe
+  days_per_step: 32          # (sharpe) CONSECUTIVE days per gradient step
+  softmax_temp: 0.1
+  allow_cash: true
+
+costs:
+  buy_bps: 15
+  sell_bps: 25
+  rf_annual: 0.055
 
 portfolio:
   strategy: long_only
   top_n: 10
+  delist_after: 20
+  delist_return: -0.5

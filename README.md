@@ -32,9 +32,11 @@ Compared to upstream DLSA the `factor_models/` and `residuals/` stages are
 
 - `scraper/`   — download & assemble IDX daily stock summary into a panel
 - `data/`      — `raw/` (scraped, gitignored), `processed/` (panel, gitignored)
-- `src/`       — preprocessing, dataset, training loop, CLI entrypoints, utils
+- `src/`       — preprocessing, universe/tradability (`market.py`), datasets,
+                 training loops, stateful backtest (`backtest.py`), CLI, utils
 - `models/`    — Transformer trading-policy model(s)
 - `configs/`   — YAML experiment configs (hyperparameters, universe, dates)
+- `tests/`     — anti-look-ahead, corporate-action, gap & backtest unit tests
 - `results/`   — metrics & plots (gitignored)
 - `logs/`      — run logs (gitignored)
 - `PLAN.md`    — full build plan and architecture rationale
@@ -54,9 +56,32 @@ python -m scraper.build_panel --raw data/raw --out data/processed/panel.parquet
 python -m src.run_train_test -c configs/transformer_base.yaml
 ```
 
+## Long-only realism (the constraint that shapes everything)
+
+The strategy is **long-only top-N**, so the backtest and objective model what
+you can actually do on IDX:
+
+- **Corporate actions**: daily returns use `close / Previous` (IDX adjusts
+  `Previous` on split ex-dates) — splits are not returns.
+- **Tradability**: no buying names pinned at ARA (no offers at the close), no
+  selling at ARB (no bids); suspended holdings stay in the book and take their
+  resume-day gap. Delisted holdings get written down.
+- **Universe**: causal liquidity screen (trailing 20d median traded value).
+- **Costs**: buy/sell bps split (commission + 0.1% sell tax); idle cash at rf.
+- **Objective**: negative *net* Sharpe (excess rf) over consecutive-day blocks
+  with turnover charged inside the loss; model selection by net top-N Sharpe.
+- **Evaluation**: walk-forward retrains, stitched out-of-sample scores, Sharpe
+  in excess of rf, plus alpha/beta/IR vs a cap-weighted IHSG proxy — the bar a
+  long-only book must beat is buy-and-hold, not zero.
+
+Run `python -m pytest tests/` for the anti-look-ahead and mechanics tests.
+
 ## Status
 
-Scaffold + plan only. See [PLAN.md](PLAN.md) for the roadmap and open questions.
+Pipeline implemented end-to-end (scrape → panel → features → walk-forward
+train → realistic backtest). See [PLAN.md](PLAN.md) for architecture and the
+2026-07-04 realism-layer changelog; [ABLATION_PLAN.md](ABLATION_PLAN.md) for
+the feature-ablation study design.
 
 ## Notes & disclaimer
 

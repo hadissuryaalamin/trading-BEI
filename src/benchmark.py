@@ -13,6 +13,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .preprocess import adjusted_log_return
+
 _KEYS = ("total_return", "ann_return", "ann_vol", "sharpe", "n_days")
 
 
@@ -24,7 +26,9 @@ def ihsg_proxy_returns(panel: pd.DataFrame) -> pd.Series:
     """
     df = panel.sort_values(["ticker", "date"]).copy()
     g = df.groupby("ticker", sort=False)
-    ret = g["close"].pct_change()  # simple daily return (for buy-and-hold compounding)
+    # split-adjusted simple daily return (close / reported Previous); a raw
+    # pct_change would book every stock split as a huge fake index move
+    ret = np.expm1(adjusted_log_return(df))
 
     if "weight_for_index" in df.columns and df["weight_for_index"].gt(0).any():
         cap = df["weight_for_index"].astype(float)

@@ -1,8 +1,15 @@
-"""Training loop + long-only top-N backtest.
+"""Training loops + quick score-based backtest.
 
-Strategy: each trading day, score every stock, buy the top-N by score
-(equal weight), hold one day, sell, repeat. Model is trained to predict the
-next-day return (MSE); ranking those predictions drives the trades.
+Three objectives:
+  train()      per-stock regression (MSE on next-day return), windowed batches
+  train_cs()   same MSE but one day (full cross-section) per step
+  train_dlsa() DLSA-style economic objective: maximize the Sharpe of a
+               long-only softmax portfolio, NET of transaction costs, over
+               blocks of CONSECUTIVE trading days (so turnover is real).
+
+The realistic simulator (suspensions, ARA/ARB, delistings) lives in
+src/backtest.py; the `backtest_long_only` here is the quick label-based
+variant used for validation-time model selection and smoke tests.
 
 torch is imported lazily inside the functions that need it, so backtest() and
 its metrics can be used (and tested) without torch installed.
@@ -12,9 +19,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .backtest import compute_metrics, TRADING_DAYS
+
 
 # --------------------------------------------------------------------------- #
-# Training
+# Regression training (per-stock windows)
 # --------------------------------------------------------------------------- #
 def train(model, train_loader, val_loader, cfg, device="cpu"):
     """Train with MSE on next-day return; early-stop on validation loss.
@@ -100,18 +109,25 @@ def predict_scores(model, dataset, device="cpu", batch_size=1024) -> pd.DataFram
 
 
 # --------------------------------------------------------------------------- #
-# Backtest (pure pandas/numpy -- no torch)
+# Quick label-based backtest (pure pandas/numpy -- no torch, no market matrix)
 # --------------------------------------------------------------------------- #
-def backtest_long_only(scores: pd.DataFrame, top_n=10, cost_bps=20.0):
-    """Daily long-only top-N. scores has columns [date, ticker, score, fwd_return].
+def backtest_long_only(
+    scores: pd.DataFrame,
+    top_n: int = 10,
+    buy_cost_bps: float = 15.0,
+    sell_cost_bps: float = 25.0,
+    rf_annual: float = 0.055,
+):
+    """Daily long-only top-N on the labels in `scores` [date,ticker,score,fwd_return].
 
-    fwd_return is the realized next-day LOG return of each stock. Each day we buy
-    the N highest-scored stocks equally, earn their mean simple return, and pay a
-    turnover-based cost when the held set changes day to day.
+    Frictionless-execution approximation (no ARA/ARB or suspension modelling --
+    use src.backtest.simulate_long_only for the real evaluation). Used for
+    validation-time model selection, where speed matters and the relative
+    ordering of models is what counts.
 
-    Returns (metrics: dict, daily: DataFrame[date, gross, net, equity]).
+    Returns (metrics: dict, daily: DataFrame).
     """
-    cost = cost_bps / 1e4
+    buy_c, sell_c = buy_cost_bps / 1e4, sell_cost_bps / 1e4
     daily = []
     prev_holdings: set[str] = set()
 
@@ -121,49 +137,23 @@ def backtest_long_only(scores: pd.DataFrame, top_n=10, cost_bps=20.0):
         simple = np.expm1(picks["fwd_return"].to_numpy())   # log -> simple
         gross = float(np.mean(simple)) if len(simple) else 0.0
 
-        # turnover: fraction of the book replaced vs yesterday (buy side); selling
-        # yesterday's names is the other leg -> approximate round-trip with 2x.
+        # equal-weight book: fraction replaced = one sell leg + one buy leg
         new_frac = 1.0 if not prev_holdings else len(held - prev_holdings) / max(len(held), 1)
-        turnover = new_frac
-        net = gross - 2 * cost * turnover
-        daily.append((date, gross, net, turnover))
+        cost = new_frac * (buy_c + sell_c)
+        daily.append((date, gross, cost, gross - cost, new_frac))
         prev_holdings = held
 
-    d = pd.DataFrame(daily, columns=["date", "gross", "net", "turnover"]).sort_values("date")
+    d = pd.DataFrame(daily, columns=["date", "gross", "cost", "net", "turnover"]).sort_values("date")
     d["equity"] = (1 + d["net"]).cumprod()
-    return _metrics(d), d
-
-
-def _metrics(d: pd.DataFrame, ann: int = 252) -> dict:
-    r = d["net"].to_numpy()
-    if len(r) == 0:
-        return {}
-    eq = d["equity"].to_numpy()
-    total = float(eq[-1] - 1)
-    ann_ret = float((1 + np.mean(r)) ** ann - 1)
-    ann_vol = float(np.std(r, ddof=0) * np.sqrt(ann))
-    sharpe = float(np.mean(r) / (np.std(r, ddof=0) + 1e-12) * np.sqrt(ann))
-    peak = np.maximum.accumulate(eq)
-    max_dd = float(((eq - peak) / peak).min())
-    win = float((r > 0).mean())
-    return {
-        "total_return": total,
-        "ann_return": ann_ret,
-        "ann_vol": ann_vol,
-        "sharpe": sharpe,
-        "max_drawdown": max_dd,
-        "win_rate": win,
-        "avg_daily_net": float(np.mean(r)),
-        "avg_turnover": float(d["turnover"].mean()),
-        "n_days": int(len(r)),
-    }
+    d["n_stuck"] = 0
+    return compute_metrics(d, rf_annual=rf_annual), d
 
 
 # --------------------------------------------------------------------------- #
-# Cross-sectional variant (one day per step; loss over that day's stocks)
+# Cross-sectional MSE variant (one day per step; loss over that day's stocks)
 # --------------------------------------------------------------------------- #
 def train_cs(model, train_ds, val_ds, cfg, device="cpu"):
-    """Train the cross-sectional model. Each step = one trading day."""
+    """Train the cross-sectional model with MSE. Each step = one trading day."""
     import random
     import time
     import torch
@@ -232,64 +222,116 @@ def predict_scores_cs(model, ds, device="cpu") -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------- #
-# DLSA-style training: optimize portfolio Sharpe end-to-end (long-only)
+# DLSA-style training: optimize NET portfolio Sharpe end-to-end (long-only)
 # --------------------------------------------------------------------------- #
-def train_dlsa(model, train_ds, val_ds, cfg, device="cpu"):
-    """End-to-end economic objective (DLSA-style), long-only.
+def train_dlsa(model, train_ds, val_ds, cfg, device="cpu", top_n: int = 10):
+    """End-to-end economic objective (DLSA-style), long-only, cost-aware.
 
-    Each day: model scores every stock -> softmax over the cross-section gives
-    long-only weights (>=0, sum to 1) -> daily portfolio return. We optimize the
-    NEGATIVE Sharpe of those daily returns over a mini-batch of days (so the
-    score is trained to rank up-movers, not to predict exact returns).
+    Each gradient step takes a block of `days_per_step` CONSECUTIVE trading
+    days. Per day the model scores every stock; softmax over the cross-section
+    (temperature `softmax_temp`; with `allow_cash` an extra always-zero logit
+    lets the portfolio retreat to cash at the risk-free rate) gives long-only
+    weights. Day-over-day weight changes within the block are charged
+    buy/sell costs (aligned by ticker), and the loss is the negative Sharpe of
+    the block's NET returns in excess of rf. Trained this way the model pays
+    for churning, unlike a gross-Sharpe objective.
 
-    train_ds / val_ds are IDXCrossSectionalDataset (per-day).
+    Early stopping / model selection uses the net Sharpe of the ACTUAL traded
+    rule -- top-N equal weight after costs -- on the validation days, not the
+    softmax portfolio, so we select the model we in fact trade.
     """
     import random
     import time
-    import numpy as np
     import torch
 
     opt = torch.optim.Adam(model.parameters(), lr=cfg.get("lr", 3e-4),
                            weight_decay=cfg.get("weight_decay", 1e-5))
     K = cfg.get("days_per_step", 32)
-    temp = cfg.get("softmax_temp", 1.0)
-    ann = 252
+    temp = cfg.get("softmax_temp", 0.1)
+    allow_cash = cfg.get("allow_cash", True)
+    buy_c = cfg.get("buy_cost_bps", 15.0) / 1e4
+    sell_c = cfg.get("sell_cost_bps", 25.0) / 1e4
+    rf_annual = cfg.get("rf_annual", 0.055)
+    rf_d = (1.0 + rf_annual) ** (1.0 / TRADING_DAYS) - 1.0
+    ann = TRADING_DAYS
     patience = cfg.get("early_stop_patience", 8)
     best, best_state, bad = -1e18, None, 0
-    order = list(range(len(train_ds)))
+    starts = list(range(0, max(len(train_ds) - 1, 1), K))  # block starts (consecutive days inside)
     t_run = time.perf_counter()
+
+    def day_portfolio(i):
+        """Weights + simple returns for day i (optionally with a cash slot)."""
+        X, y, tickers, _ = train_ds[i]
+        s = model(X.to(device)) / temp                     # (N,)
+        simple = torch.expm1(y.to(device))                 # log -> simple return
+        if allow_cash:
+            s = torch.cat([s, s.new_zeros(1)])             # cash logit = 0
+            simple = torch.cat([simple, simple.new_full((1,), rf_d)])
+        w = torch.softmax(s, dim=0)
+        return w, simple, tickers                          # tickers excl. cash slot
+
+    def block_cost(w, tickers, prev_w, prev_tickers):
+        """Cost of moving the STOCK book from prev day's weights (cash is free)."""
+        prev_map = {t: j for j, t in enumerate(prev_tickers)}
+        cur_map = {t: j for j, t in enumerate(tickers)}
+        common = [t for t in tickers if t in prev_map]
+        buys = w.new_zeros(())
+        sells = w.new_zeros(())
+        if common:
+            ci = torch.tensor([cur_map[t] for t in common], device=w.device)
+            pi = torch.tensor([prev_map[t] for t in common], device=w.device)
+            delta = w[ci] - prev_w[pi]
+            buys = buys + delta.clamp(min=0).sum()
+            sells = sells + (-delta).clamp(min=0).sum()
+        new_idx = [cur_map[t] for t in tickers if t not in prev_map]
+        gone_idx = [prev_map[t] for t in prev_tickers if t not in cur_map]
+        if new_idx:
+            buys = buys + w[torch.tensor(new_idx, device=w.device)].sum()
+        if gone_idx:
+            sells = sells + prev_w[torch.tensor(gone_idx, device=w.device)].sum()
+        return buys * buy_c + sells * sell_c
 
     for epoch in range(cfg.get("epochs", 50)):
         t_ep = time.perf_counter()
         model.train()
-        random.shuffle(order)
+        random.shuffle(starts)
         losses = []
-        for c in range(0, len(order), K):
-            chunk = order[c:c + K]
-            rets = []
-            for i in chunk:
-                X, y, _, _ = train_ds[i]
-                s = model(X.to(device))                       # (N,)
-                w = torch.softmax(s / temp, dim=0)            # long-only weights
-                simple = torch.expm1(y.to(device))            # log -> simple return
-                rets.append((w * simple).sum())
-            r = torch.stack(rets)
-            sharpe = r.mean() / (r.std() + 1e-6) * (ann ** 0.5)
+        for s0 in starts:
+            block = range(s0, min(s0 + K, len(train_ds)))
+            nets = []
+            prev_w = prev_tickers = None
+            for i in block:
+                w, simple, tickers = day_portfolio(i)
+                gross = (w * simple).sum()
+                if prev_w is None:
+                    cost = w.new_zeros(())                 # entering the block is free
+                else:
+                    cost = block_cost(w, tickers, prev_w, prev_tickers)
+                nets.append(gross - cost)
+                prev_w, prev_tickers = w, tickers
+            if len(nets) < 2:
+                continue
+            r = torch.stack(nets)
+            sharpe = (r.mean() - rf_d) / (r.std() + 1e-6) * (ann ** 0.5)
             loss = -sharpe
             opt.zero_grad()
             loss.backward()
             opt.step()
             losses.append(loss.item())
-        val_sharpe = _eval_sharpe(model, val_ds, device, temp, ann)
+
+        val_sharpe = _eval_topn_net_sharpe(
+            model, val_ds, device, top_n=top_n,
+            buy_cost_bps=buy_c * 1e4, sell_cost_bps=sell_c * 1e4, rf_annual=rf_annual,
+        )
         print(f"epoch {epoch:03d} | train_loss {np.mean(losses):.4f} | "
-              f"val_sharpe {val_sharpe:.4f} | {time.perf_counter() - t_ep:.1f}s")
+              f"val_topN_net_sharpe {val_sharpe:.4f} | {time.perf_counter() - t_ep:.1f}s")
         if val_sharpe > best + 1e-6:
             best, bad = val_sharpe, 0
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         else:
             bad += 1
             if bad >= patience:
-                print(f"early stop at epoch {epoch} (best val_sharpe {best:.4f})")
+                print(f"early stop at epoch {epoch} (best val_topN_net_sharpe {best:.4f})")
                 break
     print(f"trained {epoch + 1} epochs in {time.perf_counter() - t_run:.1f}s")
     if best_state is not None:
@@ -297,19 +339,13 @@ def train_dlsa(model, train_ds, val_ds, cfg, device="cpu"):
     return model
 
 
-def _eval_sharpe(model, ds, device, temp=1.0, ann=252):
-    import numpy as np
-    import torch
-    model.eval()
-    rets = []
-    with torch.no_grad():
-        for i in range(len(ds)):
-            X, y, _, _ = ds[i]
-            s = model(X.to(device))
-            w = torch.softmax(s / temp, dim=0)
-            simple = torch.expm1(y.to(device))
-            rets.append(float((w * simple).sum()))
-    r = np.asarray(rets)
-    if len(r) == 0 or r.std() == 0:
+def _eval_topn_net_sharpe(model, ds, device, top_n, buy_cost_bps, sell_cost_bps, rf_annual):
+    """Validation metric: net Sharpe of the traded rule (top-N after costs)."""
+    if len(ds) == 0:
         return 0.0
-    return float(r.mean() / r.std() * np.sqrt(ann))
+    scores = predict_scores_cs(model, ds, device=device)
+    m, _ = backtest_long_only(
+        scores, top_n=top_n,
+        buy_cost_bps=buy_cost_bps, sell_cost_bps=sell_cost_bps, rf_annual=rf_annual,
+    )
+    return float(m.get("sharpe", 0.0))

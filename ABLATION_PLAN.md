@@ -119,11 +119,20 @@ Robustness:
 
 ## 7. Alur kerja
 
-1. Regenerate `data/processed/panel.parquet` (file sekarang korup — footer
-   parquet tidak terbaca).
-2. Refactor `preprocess.py` jadi grup fitur + bugfix open.
-3. Buat config dasar + 5 config eksperimen (A-E).
-4. Latih tiap eksperimen × 8 seed (walk-forward).
+> **Update 2026-07-04:** pipeline sudah dirombak dengan lapisan realisme
+> long-only (lihat PLAN.md bagian "Update 2026-07-04"): return adjusted
+> split, target anti-gap, screen likuiditas, backtest stateful ARA/ARB +
+> suspensi + biaya beli/jual + rf, objective net-Sharpe hari-berurutan,
+> walk-forward per fold, metrik excess-rf + alpha/IR. Hasil ablation SEBELUM
+> tanggal ini tidak sebanding dengan hasil sesudahnya — jalankan ulang sweep.
+
+1. ~~Regenerate panel~~ selesai; `data/processed/panel.parquet` sehat
+   (2020-07-01 → 2026-07-02, 976 emiten).
+2. ~~Refactor preprocess jadi grup fitur~~ selesai (fitur berbasis open tidak
+   dipakai, jadi bug `open=0` tidak relevan).
+3. Config dasar + 5 config eksperimen (A-E) — selesai, sekarang walk-forward
+   4 fold (test 2024-07 → 2026-07) dengan `costs`/`universe` terkunci.
+4. Latih tiap eksperimen × 8 seed (walk-forward) via `compare.py`.
 5. Kumpulkan metrik via `compare.py`.
 6. Analisis: di grup mana Sharpe jenuh/menurun → tentukan set fitur optimal.
 7. (Opsional) leave-one-group-out untuk konfirmasi.
