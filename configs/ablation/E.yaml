@@ -1,0 +1,5 @@
+# Exp E (full): G1+G2+G3+G4+G5 — add microstructure (~15 features)
+base: _base.yaml
+experiment_name: ablation_E
+features:
+  feature_groups: [G1, G2, G3, G4, G5]

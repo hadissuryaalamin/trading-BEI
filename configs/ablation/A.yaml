@@ -1,0 +1,5 @@
+# Exp A (baseline): G1 only — return & momentum (~4 features)
+base: _base.yaml
+experiment_name: ablation_A
+features:
+  feature_groups: [G1]

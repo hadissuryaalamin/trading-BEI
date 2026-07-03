@@ -1,0 +1,5 @@
+# Exp D: G1+G2+G3+G4 — add foreign flow (~13 features)
+base: _base.yaml
+experiment_name: ablation_D
+features:
+  feature_groups: [G1, G2, G3, G4]

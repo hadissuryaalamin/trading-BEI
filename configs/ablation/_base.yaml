@@ -1,5 +1,11 @@
-# Cross-sectional transformer: attention across stocks each day.
-experiment_name: cross_sectional
+# Shared base for the feature-ablation sweep (see ABLATION_PLAN.md).
+# Experiments A-E inherit this via `base: _base.yaml` and override ONLY
+# `experiment_name` + `features.feature_groups`. Everything else is locked so
+# any Sharpe difference is attributable to the feature set (ABLATION_PLAN sec 4).
+#
+# Flagship model = cross-sectional transformer (attention across stocks) with the
+# DLSA-style long-only Sharpe objective. To ablate on the per-stock baseline
+# instead, swap the `model`/`train.objective` blocks here in ONE place.
 seed: 42
 
 data:
@@ -9,15 +15,14 @@ data:
   start: 2022-01-03
   end: 2026-07-02
 
-split:
+split:                       # walk-forward, by date (no random split)
   train_end: 2024-12-31
   val_end: 2025-06-30
+  # test = val_end .. data.end
 
 features:
-  # Ablation-driven: pick economic groups (see ABLATION_PLAN.md / preprocess.FEATURE_GROUPS).
-  #   G1 return&momentum | G2 vol/range | G3 volume&liquidity | G4 foreign | G5 microstructure
-  feature_groups: [G1, G2, G3, G4, G5]
   normalize: cross_sectional_zscore
+  # feature_groups is set per-experiment (A-E)
 
 window:
   lookback: 60
@@ -39,7 +44,7 @@ train:
   lr: 0.0003
   weight_decay: 0.00001
   early_stop_patience: 8
-  objective: sharpe
+  objective: sharpe          # DLSA-style: maximize long-only portfolio Sharpe
   transaction_cost_bps: 20
   days_per_step: 32          # (sharpe) days per gradient step
   softmax_temp: 1.0          # (sharpe) <1 concentrates weight on top names

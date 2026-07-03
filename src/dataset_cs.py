@@ -30,9 +30,11 @@ class IDXCrossSectionalDataset(Dataset):
         end=None,
         require_target: bool = True,
         min_stocks: int = 20,
+        feature_cols: list[str] | None = None,
     ):
         self.lookback = lookback
-        self.n_features = len(FEATURE_COLUMNS)
+        self.feature_cols = list(feature_cols) if feature_cols is not None else list(FEATURE_COLUMNS)
+        self.n_features = len(self.feature_cols)
 
         df = features.sort_values(["ticker", "date"]).reset_index(drop=True)
         start = pd.Timestamp(start) if start is not None else None
@@ -44,7 +46,7 @@ class IDXCrossSectionalDataset(Dataset):
         for ticker, block in df.groupby("ticker", sort=False):
             if len(block) < lookback:
                 continue
-            X = block[FEATURE_COLUMNS].to_numpy(dtype=np.float32)
+            X = block[self.feature_cols].to_numpy(dtype=np.float32)
             y = block[TARGET_COLUMN].to_numpy(dtype=np.float32)
             dates = block["date"].to_numpy()
             ti = len(self._tickers)
@@ -76,9 +78,9 @@ class IDXCrossSectionalDataset(Dataset):
         return torch.from_numpy(X), torch.from_numpy(y), tickers, date
 
 
-def make_cs_splits(features, lookback, train_end, val_end, data_end=None, min_stocks=20):
+def make_cs_splits(features, lookback, train_end, val_end, data_end=None, min_stocks=20, feature_cols=None):
     n = lambda d: pd.Timestamp(d) + pd.Timedelta(days=1)
-    tr = IDXCrossSectionalDataset(features, lookback, end=train_end, min_stocks=min_stocks)
-    va = IDXCrossSectionalDataset(features, lookback, start=n(train_end), end=val_end, min_stocks=min_stocks)
-    te = IDXCrossSectionalDataset(features, lookback, start=n(val_end), end=data_end, min_stocks=min_stocks)
+    tr = IDXCrossSectionalDataset(features, lookback, end=train_end, min_stocks=min_stocks, feature_cols=feature_cols)
+    va = IDXCrossSectionalDataset(features, lookback, start=n(train_end), end=val_end, min_stocks=min_stocks, feature_cols=feature_cols)
+    te = IDXCrossSectionalDataset(features, lookback, start=n(val_end), end=data_end, min_stocks=min_stocks, feature_cols=feature_cols)
     return tr, va, te

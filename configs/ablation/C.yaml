@@ -1,0 +1,5 @@
+# Exp C: G1+G2+G3 — add volume & liquidity (~11 features)
+base: _base.yaml
+experiment_name: ablation_C
+features:
+  feature_groups: [G1, G2, G3]

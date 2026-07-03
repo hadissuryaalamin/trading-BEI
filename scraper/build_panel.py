@@ -26,6 +26,7 @@ COLUMN_MAP = {
     "StockName": "name",
     "Previous": "prev_close",
     "OpenPrice": "open",
+    "FirstTrade": "first_trade",
     "High": "high",
     "Low": "low",
     "Close": "close",
@@ -37,15 +38,19 @@ COLUMN_MAP = {
     "ForeignSell": "foreign_sell",
     "ListedShares": "listed_shares",
     "TradebleShares": "tradeable_shares",
+    "WeightForIndex": "weight_for_index",
     "Bid": "bid",
+    "BidVolume": "bid_volume",
     "Offer": "offer",
+    "OfferVolume": "offer_volume",
     "Remarks": "remarks",
 }
 
 NUMERIC = [
-    "prev_close", "open", "high", "low", "close", "change",
+    "prev_close", "open", "first_trade", "high", "low", "close", "change",
     "volume", "value", "frequency", "foreign_buy", "foreign_sell",
-    "listed_shares", "tradeable_shares", "bid", "offer",
+    "listed_shares", "tradeable_shares", "weight_for_index",
+    "bid", "bid_volume", "offer", "offer_volume",
 ]
 
 _DATE_RE = re.compile(r"idx_(\d{8})\.json$")

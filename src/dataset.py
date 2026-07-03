@@ -43,10 +43,11 @@ class IDXWindowDataset(Dataset):
         start=None,
         end=None,
         require_target: bool = True,
+        feature_cols: list[str] | None = None,
     ):
         self.lookback = lookback
-        self.feature_cols = FEATURE_COLUMNS
-        self.n_features = len(FEATURE_COLUMNS)
+        self.feature_cols = list(feature_cols) if feature_cols is not None else list(FEATURE_COLUMNS)
+        self.n_features = len(self.feature_cols)
 
         df = features.sort_values(["ticker", "date"]).reset_index(drop=True)
         start = pd.Timestamp(start) if start is not None else None
@@ -94,11 +95,11 @@ class IDXWindowDataset(Dataset):
         )
 
 
-def make_splits(features, lookback, train_end, val_end, data_end=None):
+def make_splits(features, lookback, train_end, val_end, data_end=None, feature_cols=None):
     """Convenience: build (train, val, test) datasets with walk-forward dates."""
-    train = IDXWindowDataset(features, lookback, end=train_end)
-    val = IDXWindowDataset(features, lookback, start=_next_day(train_end), end=val_end)
-    test = IDXWindowDataset(features, lookback, start=_next_day(val_end), end=data_end)
+    train = IDXWindowDataset(features, lookback, end=train_end, feature_cols=feature_cols)
+    val = IDXWindowDataset(features, lookback, start=_next_day(train_end), end=val_end, feature_cols=feature_cols)
+    test = IDXWindowDataset(features, lookback, start=_next_day(val_end), end=data_end, feature_cols=feature_cols)
     return train, val, test
 
 

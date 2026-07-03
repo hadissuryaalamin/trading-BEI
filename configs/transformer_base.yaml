@@ -15,7 +15,9 @@ split:                     # walk-forward, by date (no random split)
   # test = val_end .. data.end
 
 features:
-  columns: [log_return, log_volume, hl_range, foreign_flow_ratio]
+  # Ablation-driven: pick economic groups (see ABLATION_PLAN.md / preprocess.FEATURE_GROUPS).
+  #   G1 return&momentum | G2 vol/range | G3 volume&liquidity | G4 foreign | G5 microstructure
+  feature_groups: [G1, G2, G3, G4, G5]
   normalize: cross_sectional_zscore
 
 window:
