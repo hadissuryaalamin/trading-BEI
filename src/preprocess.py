@@ -13,12 +13,14 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+# NOTE: `overnight_return` dropped -- IDX `OpenPrice` is frequently 0, so the
+# feature is either NaN or (after open->prev_close fallback) constant ~0, i.e.
+# near-zero information. `log_value` dropped -- almost perfectly collinear with
+# `log_volume` (corr ~0.99), so it adds capacity without new information.
 FEATURE_COLUMNS = [
     "log_return",
-    "overnight_return",
     "hl_range",
     "log_volume",
-    "log_value",
     "turnover",
     "foreign_flow_ratio",
 ]
@@ -38,10 +40,8 @@ def compute_features(panel: pd.DataFrame, horizon: int = 1) -> pd.DataFrame:
 
     prev_close = g["close"].shift(1)
     df["log_return"] = np.log(df["close"] / prev_close.replace(0, np.nan))
-    df["overnight_return"] = np.log(df["open"] / prev_close.replace(0, np.nan))
     df["hl_range"] = (df["high"] - df["low"]) / df["close"].replace(0, np.nan)
     df["log_volume"] = np.log1p(df["volume"].clip(lower=0))
-    df["log_value"] = np.log1p(df["value"].clip(lower=0))
 
     shares = df.get("tradeable_shares", df.get("listed_shares"))
     df["turnover"] = df["volume"] / (shares + EPS) if shares is not None else 0.0

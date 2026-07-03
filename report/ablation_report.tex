@@ -1,0 +1,196 @@
+\documentclass[10pt,twocolumn]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=0.75in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multicol}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+
+\setlength{\columnsep}{0.28in}
+
+\title{\textbf{Feature Ablation Study for Deep Learning\\
+Statistical Arbitrage on IDX Equities}}
+\author{trading-BEI project}
+\date{July 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\noindent
+We describe the experimental design for determining the optimal number
+and composition of input features for a deep learning statistical
+arbitrage (DLSA) strategy on Indonesia Stock Exchange (IDX) equities.
+Unlike the original DLSA pipeline, no factor model is used: normalized
+raw features are fed directly into a Transformer that learns
+representation and trading signal end-to-end. Because the deployed
+strategy is \emph{long-only}, it carries market beta and is therefore
+benchmarked against a buy-and-hold IHSG index. We propose a nested,
+group-wise ablation across five economically motivated feature groups,
+run over eight random seeds per configuration, and evaluated on strictly
+time-ordered walk-forward out-of-sample data. The optimal feature set is
+identified as the point at which the walk-forward Sharpe ratio saturates
+before additional features degrade performance through overfitting.
+\end{abstract}
+
+\section{Introduction}
+The \texttt{trading-BEI} project adapts Deep Learning Statistical
+Arbitrage (Guijarro-Ordonez, Pelger \& Zanotti, 2021) to IDX equities.
+The key deviation from upstream DLSA is the removal of the factor model
+and residual stages: raw daily stock-summary data is normalized and
+passed directly to a Transformer trading policy.
+
+A central open question is how many input features the model should
+receive. Because there is no factor model to pre-extract structure, the
+Transformer must learn cross-asset co-movement itself. Adding features
+increases model capacity but, on a limited history of roughly $1{,}250$
+trading days, also increases the risk of overfitting. This report
+specifies a controlled ablation study to locate the optimal feature
+count and composition.
+
+\section{Data}
+The raw input is the IDX daily \emph{Ringkasan Saham} (stock summary),
+one record per (date, ticker), spanning approximately five years
+(2020--2025). After cleaning, the panel retains $19$ columns including
+OHLC prices, previous close, volume, value, trade frequency, foreign
+buy/sell, listed and tradeable shares, and end-of-day bid/offer.
+
+Two data-quality issues are noted. First, the previously built
+\texttt{panel.parquet} is corrupt (unreadable footer) and must be
+regenerated. Second, the raw \texttt{OpenPrice} field is frequently
+zero; open-based features must fall back to the previous close or be
+flagged invalid to avoid dropping large numbers of rows.
+
+\section{Strategy Setting}
+The strategy is \emph{long-only}: positions lie in $[0,1]$ rather than
+the dollar-neutral $[-1,1]$ of classical statistical arbitrage. The
+model head therefore uses a sigmoid (or clamped \texttt{tanh}), and
+weights are normalized to a fully-invested (or cash-permitting) book.
+
+A direct consequence is exposure to market beta: unlike a
+market-neutral long/short book, a long-only strategy moves with the
+index. The appropriate benchmark is therefore a buy-and-hold IHSG index,
+not an absolute Sharpe threshold. We recommend training with the full
+cross-sectional signal (allowing the model to learn both out- and
+under-performers) and applying the long-only constraint only at the
+portfolio-construction stage.
+
+\section{Feature Groups}
+Ablation is performed over \emph{groups} of economically related
+features rather than individual features, to limit the number of
+experiments and reduce noise. Each feature is standardized
+cross-sectionally within each trading day, following the DLSA
+convention. Table~\ref{tab:groups} lists the five groups.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Feature groups used in the ablation.}
+\label{tab:groups}
+\begin{tabular}{@{}clc@{}}
+\toprule
+Grp & Features & \# \\
+\midrule
+G1 & log\_return, mom\_5/10/20 & 4 \\
+G2 & hl\_range, roll\_vol\_20, range\_ratio & 3 \\
+G3 & log\_volume, log\_value, turnover, amihud & 4 \\
+G4 & foreign\_flow\_ratio, foreign\_roll\_5 & 2 \\
+G5 & bid\_ask\_spread, book\_imbalance & 2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Representative feature definitions, all causal (no look-ahead):
+\begin{align}
+r_t &= \ln(C_t / C_{t-1}) \\
+\text{hl\_range}_t &= (H_t - L_t)/C_t \\
+\text{turnover}_t &= V_t / \text{shares}_t \\
+\text{amihud}_t &= |r_t| / \text{value}_t \\
+\text{ff\_ratio}_t &= (FB_t - FS_t)/(V_t + 1)
+\end{align}
+where $C,H,L$ are close/high/low, $V$ volume, $FB/FS$ foreign buy/sell.
+
+\section{Ablation Design}
+Experiments are \emph{nested}: starting from a minimal set and adding one
+group at a time (Table~\ref{tab:design}). The optimal feature count is
+the stage at which the walk-forward Sharpe stops improving.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Nested experiment design.}
+\label{tab:design}
+\begin{tabular}{@{}clc@{}}
+\toprule
+Exp & Active groups & $\approx$\# feat. \\
+\midrule
+A (baseline) & G1 & 4 \\
+B & G1+G2 & 7 \\
+C & G1+G2+G3 & 11 \\
+D & G1+G2+G3+G4 & 13 \\
+E (full) & G1+G2+G3+G4+G5 & 15 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+If the Sharpe rises through A$\to$B$\to$C then plateaus or declines at
+D/E, the saturation point identifies the optimal feature set. An
+optional leave-one-group-out pass on the best configuration confirms
+each group's marginal contribution.
+
+\section{Experimental Controls}
+For the comparison to be valid, \emph{only the active feature list} may
+differ between experiments. All of the following are held identical:
+Transformer architecture ($d_{\text{model}}$, layers, heads, dropout);
+lookback $T$ and target horizon; walk-forward split dates; transaction
+cost (bps), turnover penalty, and long-only constraint; epochs, learning
+rate, and early-stopping rule; and the seed grid. Without these
+controls, differences in Sharpe cannot be attributed to features.
+
+\section{Evaluation}
+Evaluation is out-of-sample (walk-forward), never training loss. The
+primary ranking metric is the annualized Sharpe ratio; supporting
+metrics are cumulative return versus buy-and-hold IHSG (because
+long-only carries beta), maximum drawdown, and turnover (a proxy for the
+high real trading costs on IDX).
+
+For robustness, each configuration is run over \textbf{eight random
+seeds}, reporting mean $\pm$ standard deviation. Eight seeds provide a
+stable variance estimate and support significance testing between
+configurations; a Sharpe gap below roughly $0.1$ is likely seed noise
+rather than a feature effect. The full study therefore comprises
+$5 \times 8 = 40$ runs.
+
+\section{Implementation Changes}
+The study requires: (i) making \texttt{src/preprocess.py} config-driven,
+replacing the fixed \texttt{FEATURE\_COLUMNS} constant with group
+definitions and computing the feature superset while selecting active
+groups from config; (ii) fixing the \texttt{open=0} bug for open-based
+features; (iii) one YAML per experiment in \texttt{configs/} differing
+only in \texttt{feature\_groups}; (iv) extending \texttt{compare.py} to
+aggregate results into a single table (feature set $\to$ Sharpe $\to$
+return $\to$ drawdown $\to$ turnover, mean $\pm$ std across seeds); and
+(v) saving metrics and equity-curve plots to \texttt{results/}.
+
+\section{Risks}
+The main risks are overfitting from limited data combined with many
+features (precisely the effect under test), feature collinearity (e.g.\
+log\_volume vs.\ log\_value should not be read as new information),
+seed noise (hence multi-seed runs), and look-ahead leakage in momentum,
+rolling, and normalization steps (the most bug-prone area, to be covered
+by anti-look-ahead unit tests). The long-only benchmark must remain
+IHSG, not an absolute return figure.
+
+\section{Definition of Done}
+The study is complete when all five experiments (A--E) have run over
+eight seeds each ($40$ runs), the comparison table is populated with
+mean $\pm$ std for all metrics, the optimal feature set is identified
+with justification (the Sharpe saturation point), and findings are
+documented in \texttt{results/} and summarized in the project plan.
+
+\end{document}
