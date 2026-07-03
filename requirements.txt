@@ -1,3 +1,12 @@
+# --- PyTorch CUDA build ---
+# The default PyPI torch wheel is CPU-only on Windows (and may lag CUDA support
+# elsewhere). This extra index serves the CUDA 12.8 build, required for RTX
+# 50-series / Blackwell GPUs. `pip install -r requirements.txt` then pulls the
+# +cu128 wheel directly -- no separate torch install needed.
+# For a different GPU/CUDA, change cu128 (e.g. cu126, cu124); for CPU-only, delete
+# this line. Verify with: python -c "import torch; print(torch.cuda.is_available())"
+--extra-index-url https://download.pytorch.org/whl/cu128
+
 # Core
 numpy>=1.26
 pandas>=2.2
@@ -5,7 +14,7 @@ pyarrow>=15.0          # parquet storage for panel data
 scipy>=1.13
 
 # Deep learning
-torch>=2.2
+torch>=2.2             # resolves to the +cu128 wheel via the extra index above
 
 # Scraping IDX
 requests>=2.31
