@@ -1,30 +1,51 @@
-"""Feature-ablation sweep: run configs A-E across multiple seeds and tabulate
-out-of-sample backtest metrics as mean +/- std (see ABLATION_PLAN.md sec 5-6).
+"""Feature-ablation sweep: run configs A-E across seeds, optionally in parallel,
+and tabulate out-of-sample metrics as mean +/- std vs an IHSG proxy benchmark
+(see ABLATION_PLAN.md sec 5-6).
 
     python compare.py                      # all configs/ablation/*.yaml, 8 seeds
-    python compare.py --seeds 3            # quicker partial sweep
-    python compare.py --config-dir configs/ablation --seeds 8 --start-seed 0
+    python compare.py --seeds 4            # quicker partial sweep
+    python compare.py --parallel 3         # 3 concurrent runs (needs ~3x VRAM)
 
-Each (experiment, seed) is one walk-forward train+backtest via run(). Per-seed
-runs don't write to results/ (save disabled); this script writes the aggregate.
-
-NOTE: the long-only benchmark vs IHSG buy-and-hold (ABLATION_PLAN sec 5) and
-equity-curve plots (sec 6.5) are a separate follow-up -- not produced here.
+Parallelism is VRAM-bound: each run holds ~7-8 GB (K = train.days_per_step
+autograd graphs). Set --parallel to floor(GPU_VRAM_GB / 8):
+    8 GB laptop  -> 1 (parallel won't fit; keep sequential)
+    24 GB card   -> 3
+    32 GB card   -> 4
+In parallel mode each run's stdout goes to results/ablation/logs/<label>_seed<n>.log
+(so the console stays readable); sequential mode prints live to the console.
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import multiprocessing
 import statistics
+import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-from src.run_train_test import run
 from src.utils import load_config
 from src.preprocess import resolve_features
 
 # Ranking metric first; the rest are context (ABLATION_PLAN sec 5).
 # excess_ann_return = strategy ann_return - IHSG proxy ann_return (long-only alpha).
 METRICS = ["sharpe", "ann_return", "excess_ann_return", "max_drawdown", "avg_turnover"]
+
+
+def _run_job(args):
+    """Worker: one (config, seed) walk-forward run. Top-level so it is picklable
+    for the spawn-based process pool. Returns (label, seed, metrics)."""
+    cfg_path, seed, label, log_path = args
+    if log_path:  # parallel mode -> isolate this run's noisy logs to a file
+        f = open(log_path, "w", buffering=1, encoding="utf-8")
+        sys.stdout = sys.stderr = f
+    from src.run_train_test import run  # imported here so torch/CUDA init happens per worker
+    metrics = run(cfg_path, overrides={
+        "seed": seed,
+        "experiment_name": f"{label}_seed{seed}",
+        "save": False,
+    })
+    return label, seed, metrics
 
 
 def _agg(vals: list[float]) -> tuple[float, float]:
@@ -37,10 +58,12 @@ def _agg(vals: list[float]) -> tuple[float, float]:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Run the feature-ablation seed sweep.")
+    ap = argparse.ArgumentParser(description="Run the feature-ablation seed sweep (parallel-capable).")
     ap.add_argument("--config-dir", default="configs/ablation")
     ap.add_argument("--seeds", type=int, default=8, help="number of seeds per experiment")
     ap.add_argument("--start-seed", type=int, default=0)
+    ap.add_argument("--parallel", type=int, default=1,
+                    help="concurrent runs; VRAM-bound (~8 GB each). 1 on an 8 GB laptop, ~3 on 24 GB")
     ap.add_argument("--out", default="results/ablation")
     args = ap.parse_args()
 
@@ -49,39 +72,69 @@ def main() -> None:
         raise SystemExit(f"No experiment configs (non-'_') in {args.config_dir}")
     seeds = list(range(args.start_seed, args.start_seed + args.seeds))
 
-    summary: list[dict] = []   # one aggregated row per experiment
-    per_seed: list[dict] = []  # one row per (experiment, seed)
-
+    # per-experiment metadata (in config order) + the flat job list
+    meta: dict[str, tuple[str, int]] = {}   # label -> (groups, n_features)
+    order: list[str] = []
+    jobs: list[tuple] = []
+    logdir = Path(args.out) / "logs"
     for cp in cfg_paths:
         cfg = load_config(str(cp))
         label = cfg.get("experiment_name", cp.stem)
         groups = ",".join(cfg.get("features", {}).get("feature_groups", []) or [])
-        active = resolve_features(cfg.get("features"))
-        collected = {m: [] for m in METRICS}
-        beats, ihsg_ann, ihsg_sh = [], [], []
-
+        meta[label] = (groups, len(resolve_features(cfg.get("features"))))
+        order.append(label)
         for s in seeds:
-            print(f"\n{'='*64}\n{label}  [{groups} | {len(active)} feats]  seed={s}\n{'='*64}")
-            metrics = run(str(cp), overrides={
-                "seed": s,
-                "experiment_name": f"{label}_seed{s}",
-                "save": False,
-            })
-            rec = {"experiment": label, "groups": groups, "n_features": len(active), "seed": s}
-            for m in METRICS:
-                v = float(metrics.get(m, float("nan")))
-                collected[m].append(v)
-                rec[m] = v
-            rec["beats_ihsg"] = bool(metrics.get("beats_ihsg", False))
+            log_path = None
+            if args.parallel > 1:
+                logdir.mkdir(parents=True, exist_ok=True)
+                log_path = str(logdir / f"{label}_seed{s}.log")
+            jobs.append((str(cp), s, label, log_path))
+
+    print(f"{len(jobs)} runs = {len(cfg_paths)} configs x {len(seeds)} seeds | parallel={args.parallel}")
+    if args.parallel > 1:
+        print(f"per-run logs -> {logdir}/")
+
+    # --- execute ---
+    results: dict[tuple[str, int], dict] = {}
+    if args.parallel <= 1:
+        for cfg_path, seed, label, _ in jobs:
+            g, nf = meta[label]
+            print(f"\n{'='*64}\n{label}  [{g} | {nf} feats]  seed={seed}\n{'='*64}")
+            _, _, m = _run_job((cfg_path, seed, label, None))  # console output
+            results[(label, seed)] = m
+    else:
+        ctx = multiprocessing.get_context("spawn")  # required for CUDA in workers
+        with ProcessPoolExecutor(max_workers=args.parallel, mp_context=ctx) as ex:
+            futures = [ex.submit(_run_job, job) for job in jobs]
+            for i, fut in enumerate(as_completed(futures), 1):
+                label, seed, m = fut.result()
+                results[(label, seed)] = m
+                print(f"[{i}/{len(jobs)}] done: {label} seed={seed} | "
+                      f"sharpe={m.get('sharpe', float('nan')):.3f} | beats_ihsg={m.get('beats_ihsg')}")
+
+    # --- aggregate per experiment (preserve config order) ---
+    summary: list[dict] = []
+    per_seed: list[dict] = []
+    for label in order:
+        groups, nf = meta[label]
+        collected = {k: [] for k in METRICS}
+        beats, ihsg_ann, ihsg_sh = [], [], []
+        for s in seeds:
+            m = results.get((label, s), {})
+            rec = {"experiment": label, "groups": groups, "n_features": nf, "seed": s}
+            for k in METRICS:
+                v = float(m.get(k, float("nan")))
+                collected[k].append(v)
+                rec[k] = v
+            rec["beats_ihsg"] = bool(m.get("beats_ihsg", False))
             beats.append(rec["beats_ihsg"])
-            ihsg_ann.append(float(metrics.get("ihsg_ann_return", float("nan"))))
-            ihsg_sh.append(float(metrics.get("ihsg_sharpe", float("nan"))))
+            ihsg_ann.append(float(m.get("ihsg_ann_return", float("nan"))))
+            ihsg_sh.append(float(m.get("ihsg_sharpe", float("nan"))))
             per_seed.append(rec)
 
-        row = {"experiment": label, "groups": groups, "n_features": len(active), "n_seeds": len(seeds)}
-        for m in METRICS:
-            mean, std = _agg(collected[m])
-            row[f"{m}_mean"], row[f"{m}_std"] = mean, std
+        row = {"experiment": label, "groups": groups, "n_features": nf, "n_seeds": len(seeds)}
+        for k in METRICS:
+            row[f"{k}_mean"], row[f"{k}_std"] = _agg(collected[k])
         row["beats_ihsg"] = f"{sum(beats)}/{len(beats)}"
         row["ihsg_ann_return"] = _agg(ihsg_ann)[0]
         row["ihsg_sharpe"] = _agg(ihsg_sh)[0]

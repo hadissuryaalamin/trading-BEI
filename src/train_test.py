@@ -21,6 +21,7 @@ def train(model, train_loader, val_loader, cfg, device="cpu"):
 
     Returns the model loaded with the best (lowest val-loss) weights.
     """
+    import time
     import torch
     import torch.nn as nn
 
@@ -32,8 +33,10 @@ def train(model, train_loader, val_loader, cfg, device="cpu"):
     loss_fn = nn.MSELoss()
     patience = cfg.get("early_stop_patience", 8)
     best_val, best_state, bad = float("inf"), None, 0
+    t_run = time.perf_counter()
 
     for epoch in range(cfg.get("epochs", 50)):
+        t_ep = time.perf_counter()
         model.train()
         tr_loss = n = 0
         for x, y, _ in train_loader:
@@ -46,7 +49,7 @@ def train(model, train_loader, val_loader, cfg, device="cpu"):
         tr_loss /= max(n, 1)
 
         val_loss = _eval_loss(model, val_loader, loss_fn, device)
-        print(f"epoch {epoch:03d} | train {tr_loss:.6f} | val {val_loss:.6f}")
+        print(f"epoch {epoch:03d} | train {tr_loss:.6f} | val {val_loss:.6f} | {time.perf_counter() - t_ep:.1f}s")
 
         if val_loss < best_val - 1e-7:
             best_val, bad = val_loss, 0
@@ -57,6 +60,7 @@ def train(model, train_loader, val_loader, cfg, device="cpu"):
                 print(f"early stop at epoch {epoch} (best val {best_val:.6f})")
                 break
 
+    print(f"trained {epoch + 1} epochs in {time.perf_counter() - t_run:.1f}s")
     if best_state is not None:
         model.load_state_dict(best_state)
     return model
@@ -161,6 +165,7 @@ def _metrics(d: pd.DataFrame, ann: int = 252) -> dict:
 def train_cs(model, train_ds, val_ds, cfg, device="cpu"):
     """Train the cross-sectional model. Each step = one trading day."""
     import random
+    import time
     import torch
     import torch.nn as nn
 
@@ -170,8 +175,10 @@ def train_cs(model, train_ds, val_ds, cfg, device="cpu"):
     patience = cfg.get("early_stop_patience", 8)
     best_val, best_state, bad = float("inf"), None, 0
     order = list(range(len(train_ds)))
+    t_run = time.perf_counter()
 
     for epoch in range(cfg.get("epochs", 50)):
+        t_ep = time.perf_counter()
         model.train()
         random.shuffle(order)
         tr = n = 0
@@ -184,7 +191,7 @@ def train_cs(model, train_ds, val_ds, cfg, device="cpu"):
             opt.step()
             tr += loss.item(); n += 1
         val = _eval_loss_cs(model, val_ds, loss_fn, device)
-        print(f"epoch {epoch:03d} | train {tr/max(n,1):.6f} | val {val:.6f}")
+        print(f"epoch {epoch:03d} | train {tr/max(n,1):.6f} | val {val:.6f} | {time.perf_counter() - t_ep:.1f}s")
         if val < best_val - 1e-7:
             best_val, bad = val, 0
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
@@ -193,6 +200,7 @@ def train_cs(model, train_ds, val_ds, cfg, device="cpu"):
             if bad >= patience:
                 print(f"early stop at epoch {epoch} (best val {best_val:.6f})")
                 break
+    print(f"trained {epoch + 1} epochs in {time.perf_counter() - t_run:.1f}s")
     if best_state is not None:
         model.load_state_dict(best_state)
     return model
@@ -237,6 +245,7 @@ def train_dlsa(model, train_ds, val_ds, cfg, device="cpu"):
     train_ds / val_ds are IDXCrossSectionalDataset (per-day).
     """
     import random
+    import time
     import numpy as np
     import torch
 
@@ -248,8 +257,10 @@ def train_dlsa(model, train_ds, val_ds, cfg, device="cpu"):
     patience = cfg.get("early_stop_patience", 8)
     best, best_state, bad = -1e18, None, 0
     order = list(range(len(train_ds)))
+    t_run = time.perf_counter()
 
     for epoch in range(cfg.get("epochs", 50)):
+        t_ep = time.perf_counter()
         model.train()
         random.shuffle(order)
         losses = []
@@ -270,7 +281,8 @@ def train_dlsa(model, train_ds, val_ds, cfg, device="cpu"):
             opt.step()
             losses.append(loss.item())
         val_sharpe = _eval_sharpe(model, val_ds, device, temp, ann)
-        print(f"epoch {epoch:03d} | train_loss {np.mean(losses):.4f} | val_sharpe {val_sharpe:.4f}")
+        print(f"epoch {epoch:03d} | train_loss {np.mean(losses):.4f} | "
+              f"val_sharpe {val_sharpe:.4f} | {time.perf_counter() - t_ep:.1f}s")
         if val_sharpe > best + 1e-6:
             best, bad = val_sharpe, 0
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
@@ -279,6 +291,7 @@ def train_dlsa(model, train_ds, val_ds, cfg, device="cpu"):
             if bad >= patience:
                 print(f"early stop at epoch {epoch} (best val_sharpe {best:.4f})")
                 break
+    print(f"trained {epoch + 1} epochs in {time.perf_counter() - t_run:.1f}s")
     if best_state is not None:
         model.load_state_dict(best_state)
     return model
