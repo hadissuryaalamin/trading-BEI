@@ -27,6 +27,7 @@ features:
 window:
   lookback: 60
   horizon: 1
+  execution_lag: 1           # decide at close t, execute at close t+1 (0 = same-close, diagnostics only)
 
 model:
   name: cross_sectional
@@ -53,6 +54,8 @@ costs:
   buy_bps: 15
   sell_bps: 25
   rf_annual: 0.055
+  default_half_spread_bps: 35   # per-side spread cost when the closing book is empty
+  max_half_spread_bps: 200      # cap on per-side spread cost from pathological books
 
 portfolio:
   strategy: long_only

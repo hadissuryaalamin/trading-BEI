@@ -31,6 +31,7 @@ features:
 window:
   lookback: 60
   horizon: 1
+  execution_lag: 1           # decide at close t, execute at close t+1 (0 = same-close, diagnostics only)
 
 model:
   name: cross_sectional
@@ -53,10 +54,12 @@ train:
   softmax_temp: 0.1          # (sharpe) concentrate weights like the traded top-N book
   allow_cash: true           # (sharpe) extra zero logit = retreat to cash at rf
 
-costs:                       # IDX round trip: ~15bps commission/side + 10bps sell tax
+costs:                       # IDX round trip: ~15bps commission/side + 10bps sell tax + spread
   buy_bps: 15
   sell_bps: 25
   rf_annual: 0.055           # BI-rate-ish; Sharpe is computed in excess of this
+  default_half_spread_bps: 35   # per-side spread cost when the closing book is empty
+  max_half_spread_bps: 200      # cap on per-side spread cost from pathological books
 
 portfolio:
   strategy: long_only

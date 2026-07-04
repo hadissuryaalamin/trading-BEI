@@ -67,16 +67,25 @@ def build_market(panel: pd.DataFrame) -> pd.DataFrame:
     """Per (date, ticker) execution-relevant facts for the backtest simulator.
 
     Returns columns:
-        ret      : split-adjusted simple daily return (stale/no-trade days ~ 0)
-        traded   : volume > 0 that day
-        can_buy  : traded and offers exist at the close (not pinned at ARA)
-        can_sell : traded and bids exist at the close (not pinned at ARB)
+        ret         : split-adjusted simple daily return (stale/no-trade days ~ 0)
+        traded      : volume > 0 that day
+        can_buy     : traded and offers exist at the close (not pinned at ARA)
+        can_sell    : traded and bids exist at the close (not pinned at ARB)
+        half_spread : (offer - bid) / (2 * mid) from the closing book -- the
+                      per-side liquidity cost the simulator charges on fills;
+                      NaN when the book is empty/one-sided (simulator falls
+                      back to its default)
     """
     df = panel.sort_values(["ticker", "date"]).copy()
     ret = np.expm1(adjusted_log_return(df))
     traded = (df["volume"].fillna(0) > 0) if "volume" in df.columns else pd.Series(True, index=df.index)
     offer = df["offer"].fillna(0) if "offer" in df.columns else pd.Series(1.0, index=df.index)
     bid = df["bid"].fillna(0) if "bid" in df.columns else pd.Series(1.0, index=df.index)
+    if {"bid", "offer"}.issubset(df.columns):
+        valid_book = (bid > 0) & (offer > 0) & (offer >= bid)
+        half_spread = ((offer - bid) / (bid + offer)).where(valid_book)  # = spread / (2 * mid)
+    else:
+        half_spread = pd.Series(np.nan, index=df.index)
     out = pd.DataFrame(
         {
             "date": df["date"],
@@ -85,6 +94,7 @@ def build_market(panel: pd.DataFrame) -> pd.DataFrame:
             "traded": traded.to_numpy(),
             "can_buy": (traded & (offer > 0)).to_numpy(),
             "can_sell": (traded & (bid > 0)).to_numpy(),
+            "half_spread": half_spread.to_numpy(),
         }
     )
     return out.reset_index(drop=True)

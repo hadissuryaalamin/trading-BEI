@@ -29,9 +29,10 @@ def test_split_is_not_a_return():
     r = _row(feats, "SPLT", 20, dates)
     assert abs(r["log_return"]) < 1e-9          # close/prev_close = 50/50
     assert abs(r["mom_5"]) < 1e-9               # adjusted log-price path is flat
-    # the day BEFORE the split: forward return crosses the split, still ~0
-    r_before = _row(feats, "SPLT", 19, dates)
-    assert abs(r_before[TARGET_COLUMN]) < 1e-9
+    # targets whose entry->exit window crosses the split must still be ~0
+    # (default execution_lag=1: target at t covers close(t+1) -> close(t+2))
+    assert abs(_row(feats, "SPLT", 18, dates)[TARGET_COLUMN]) < 1e-9
+    assert abs(_row(feats, "SPLT", 19, dates)[TARGET_COLUMN]) < 1e-9
 
 
 def test_split_adjusted_market_returns():
@@ -46,21 +47,25 @@ def test_split_adjusted_market_returns():
 # Gaps / suspensions / stale prices
 # --------------------------------------------------------------------------- #
 def test_target_nan_across_row_gap():
-    """If the ticker has no row on t+1, the 'next-day' label must not exist."""
+    """If entry (t+1) or exit (t+2) has no row, the label must not exist."""
     panel = make_panel({"GAPP": {"skip_days": {21, 22, 23}}, "FLAT": {}})
     dates = sorted(panel["date"].unique())
     feats = compute_features(panel)
-    assert np.isnan(_row(feats, "GAPP", 20, dates)[TARGET_COLUMN])   # spans the gap
-    assert np.isfinite(_row(feats, "GAPP", 19, dates)[TARGET_COLUMN])  # t+1 exists
-    assert _row(feats, "GAPP", 20, dates)["fwd_gap"] == 4
+    assert np.isnan(_row(feats, "GAPP", 20, dates)[TARGET_COLUMN])   # entry day missing
+    assert np.isnan(_row(feats, "GAPP", 19, dates)[TARGET_COLUMN])   # exit spans the gap
+    assert np.isfinite(_row(feats, "GAPP", 18, dates)[TARGET_COLUMN])  # 19->20 intact
+    # rows after day 20 are days 24,25,...: exit is 5 calendar days out, not 2
+    assert _row(feats, "GAPP", 20, dates)["fwd_gap"] == 5
 
 
-def test_target_nan_when_next_day_not_traded():
-    """A stale (volume=0) next-day close is not a real, realizable return."""
+def test_target_nan_when_entry_or_exit_not_traded():
+    """A stale (volume=0) close is not a real, realizable fill price."""
     panel = make_panel({"STAL": {"no_trade": {21}}, "FLAT": {}})
     dates = sorted(panel["date"].unique())
     feats = compute_features(panel)
-    assert np.isnan(_row(feats, "STAL", 20, dates)[TARGET_COLUMN])
+    assert np.isnan(_row(feats, "STAL", 20, dates)[TARGET_COLUMN])   # entry (21) stale
+    assert np.isnan(_row(feats, "STAL", 19, dates)[TARGET_COLUMN])   # exit (21) stale
+    assert np.isfinite(_row(feats, "STAL", 18, dates)[TARGET_COLUMN])  # 19->20 fine
     r = _row(feats, "STAL", 20, dates)
     assert r["valid_day"]                        # day t itself traded fine
 
@@ -114,9 +119,21 @@ def test_no_lookahead_features(simple_panel):
     )
 
 
-def test_target_is_the_next_day_return(simple_panel):
-    """fwd_return at t equals the adjusted log return realized on t+1."""
+def test_target_is_the_lagged_next_day_return(simple_panel):
+    """Default execution_lag=1: fwd_return at t = the daily return realized on
+    t+2 (enter close t+1, exit close t+2) -- what a signal at t can capture."""
     feats = compute_features(simple_panel)
+    a = feats[feats["ticker"] == "AAAA"].reset_index(drop=True)
+    got = a[TARGET_COLUMN].to_numpy()[:-2]
+    nxt = a["log_return"].to_numpy()[2:]
+    ok = np.isfinite(got)
+    assert ok.sum() > 20
+    np.testing.assert_allclose(got[ok], nxt[ok], atol=1e-10)
+
+
+def test_execution_lag_zero_is_same_close_convention(simple_panel):
+    """execution_lag=0 (diagnostics only) recovers target = return on t+1."""
+    feats = compute_features(simple_panel, execution_lag=0)
     a = feats[feats["ticker"] == "AAAA"].reset_index(drop=True)
     got = a[TARGET_COLUMN].to_numpy()[:-1]
     nxt = a["log_return"].to_numpy()[1:]

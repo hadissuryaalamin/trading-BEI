@@ -197,3 +197,31 @@ diimplementasikan (lihat juga `tests/`):
    proxy IHSG (long-only didominasi beta).
 7. **Anti look-ahead**: unit test di `tests/test_preprocess.py` (mutasi data
    masa depan tidak boleh mengubah fitur ≤ t).
+
+## Update 2026-07-04 (2) — audit: timing eksekusi, spread, benchmark
+
+Audit menemukan bahwa hasil headline lama (+127%) SEPENUHNYA bergantung pada
+eksekusi same-close: skor yang sama, dieksekusi telat 1 hari bursa, berubah
+dari Sharpe +1.12 menjadi −3.3. Tiga perbaikan:
+
+1. **Timing eksekusi (`window.execution_lag: 1`, default)**: fitur di hari t
+   memakai data PENUTUPAN hari t, jadi order baru bisa dieksekusi di close
+   t+1. Label training = log return close(t+1) → close(t+2) — model dilatih
+   pada return yang benar-benar bisa ditangkap. Simulator memetakan skor
+   bertanggal t ke hari eksekusi t+1 di kalender bursa; tradability (ARA/ARB)
+   dicek di HARI EKSEKUSI. `execution_lag: 0` (konvensi MOC lama) hanya untuk
+   diagnosa peluruhan sinyal.
+2. **Biaya spread**: `build_market` menghitung `half_spread` dari book
+   penutupan ((offer−bid)/2/mid); simulator menagih komisi + half-spread per
+   sisi di tiap fill (fallback `default_half_spread_bps: 35` bila book kosong,
+   cap `max_half_spread_bps: 200`). Median spread universe likuid ~70bps —
+   komisi saja terlalu murah hati.
+3. **Benchmark IHSG (bug)**: `weight_for_index` adalah JUMLAH SAHAM
+   (float-adjusted), bukan kapitalisasi — dipakai langsung sebagai bobot
+   membuat proxy share-weighted (GOTO ~21% sendiri; proxy +53% padahal IHSG
+   riil −20% di jendela test yang sama). Perbaikan: bobot = close ×
+   weight_for_index (fallback tradeable/listed shares). Validasi vs IHSG
+   riil: 6 tahun +13.5% (riil +11.4%); Jul-2024→Jul-2026 −18.9% (riil −20.1%).
+
+Konsekuensi: SEMUA hasil di `results/` sebelum tanggal ini tidak valid dan
+harus di-train ulang (label berubah, bukan sekadar simulasi ulang).

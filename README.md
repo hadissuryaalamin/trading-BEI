@@ -61,17 +61,26 @@ python -m src.run_train_test -c configs/transformer_base.yaml
 The strategy is **long-only top-N**, so the backtest and objective model what
 you can actually do on IDX:
 
+- **Execution timing**: features use day-t *closing* data, so orders execute
+  at the close of **t+1** (`window.execution_lag: 1`) — training labels and
+  the simulator share the lag, so the model learns the return it can actually
+  capture. Same-close (lag 0) exists only as a signal-decay diagnostic.
 - **Corporate actions**: daily returns use `close / Previous` (IDX adjusts
   `Previous` on split ex-dates) — splits are not returns.
 - **Tradability**: no buying names pinned at ARA (no offers at the close), no
-  selling at ARB (no bids); suspended holdings stay in the book and take their
-  resume-day gap. Delisted holdings get written down.
+  selling at ARB (no bids) — checked on the *execution* day; suspended
+  holdings stay in the book and take their resume-day gap. Delisted holdings
+  get written down.
 - **Universe**: causal liquidity screen (trailing 20d median traded value).
-- **Costs**: buy/sell bps split (commission + 0.1% sell tax); idle cash at rf.
+- **Costs**: buy/sell bps split (commission + 0.1% sell tax) **plus each
+  name's half-spread from its own closing book** on every fill (the liquid
+  IDX universe's median spread is ~70bps — commission alone flatters);
+  idle cash at rf.
 - **Objective**: negative *net* Sharpe (excess rf) over consecutive-day blocks
   with turnover charged inside the loss; model selection by net top-N Sharpe.
 - **Evaluation**: walk-forward retrains, stitched out-of-sample scores, Sharpe
-  in excess of rf, plus alpha/beta/IR vs a cap-weighted IHSG proxy — the bar a
+  in excess of rf, plus alpha/beta/IR vs a cap-weighted IHSG proxy
+  (`close × weight_for_index`, validated against the real index) — the bar a
   long-only book must beat is buy-and-hold, not zero.
 
 Run `python -m pytest tests/` for the anti-look-ahead and mechanics tests.

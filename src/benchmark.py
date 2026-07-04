@@ -1,8 +1,14 @@
 """IHSG (composite index) proxy benchmark, reconstructed from the panel itself.
 
 The proxy is a market-cap-weighted daily return of the whole cross-section using
-PREVIOUS-day weights (so it is causal / has no look-ahead). It prefers IDX's own
-`weight_for_index` column when present, else falls back to close * listed_shares.
+PREVIOUS-day weights (so it is causal / has no look-ahead). The cap is
+close * shares, where shares prefers IDX's own `weight_for_index` (the
+float-adjusted share count used for index weighting -- NOTE: it is a SHARE
+COUNT, not a cap; using it directly as a weight share-weights the index and
+lets trillion-share penny stocks like GOTO dominate), then `tradeable_shares`,
+then `listed_shares`. Validated against the real IHSG over 2020-07..2026-07:
+close*weight_for_index gives +13.5% (real: +11.4%), and -18.9% over
+2024-07..2026-07 (real: -20.1%).
 
 Purpose: a long-only strategy is exposed to market beta, so a high Sharpe alone
 can still lose to simply buying and holding the market. This benchmark is the
@@ -31,11 +37,14 @@ def ihsg_proxy_returns(panel: pd.DataFrame) -> pd.Series:
     ret = np.expm1(adjusted_log_return(df))
 
     if "weight_for_index" in df.columns and df["weight_for_index"].gt(0).any():
-        cap = df["weight_for_index"].astype(float)
+        shares = df["weight_for_index"].astype(float)  # index share COUNT (float-adjusted)
+    elif "tradeable_shares" in df.columns:
+        shares = df["tradeable_shares"].astype(float)
     elif "listed_shares" in df.columns:
-        cap = df["close"] * df["listed_shares"]
+        shares = df["listed_shares"].astype(float)
     else:
-        cap = pd.Series(1.0, index=df.index)
+        shares = pd.Series(1.0, index=df.index)
+    cap = df["close"] * shares
     w_prev = cap.groupby(df["ticker"], sort=False).shift(1)  # yesterday's weight (causal)
 
     valid = ret.notna() & w_prev.notna() & (w_prev > 0)

@@ -2,10 +2,13 @@
 
 Simulation model (all pure pandas/numpy -- no torch):
 
-- Signals at the close of day t are executed AT that close (MOC assumption --
-  the standard close-to-close research convention; documented, not hidden).
-- Each day the strategy targets the top-N scored names among those it can
-  actually BUY (traded, offers present -> not pinned at ARA), equal weight.
+- Signals dated day t are executed at the close of t + `execution_lag`
+  trading days (default 1). Features are computed FROM day-t closing data, so
+  executing at that same close is not implementable; `execution_lag=0` keeps
+  the old same-close (MOC) convention for signal-decay diagnostics only.
+- Each execution day the strategy targets the top-N scored names among those
+  it can actually BUY (traded, offers present -> not pinned at ARA), equal
+  weight; tradability is evaluated on the EXECUTION day.
 - Positions it wants to exit but CANNOT sell (suspended, or pinned at ARB with
   no bids) stay in the book ("stuck") and keep earning their subsequent
   returns -- the backtest pays for suspension risk instead of deleting it.
@@ -13,7 +16,11 @@ Simulation model (all pure pandas/numpy -- no torch):
   is written down by `delist_return` after `delist_after` consecutive missing
   days, then removed.
 - Costs: `buy_cost_bps` on weight bought, `sell_cost_bps` on weight sold
-  (IDX: ~15bps commission per side + 10bps sales tax on sells -> 15/25 default).
+  (IDX: ~15bps commission per side + 10bps sales tax on sells -> 15/25 default),
+  PLUS the name's own half-spread from the closing book on every fill (capped
+  at `max_half_spread_bps`; `default_half_spread_bps` when the book is empty).
+  Commission alone flatters IDX badly: the liquid-universe median spread is
+  ~70bps, i.e. ~35bps per side on top of commission.
 - Idle cash earns the risk-free rate (`rf_annual`, BI-rate-ish).
 
 Weights are fractions of current equity; each day applies returns first (book
@@ -37,8 +44,18 @@ def simulate_long_only(
     rf_annual: float = 0.055,
     delist_after: int = 20,
     delist_return: float = -0.5,
+    execution_lag: int = 1,
+    default_half_spread_bps: float = 35.0,
+    max_half_spread_bps: float = 200.0,
 ) -> tuple[dict, pd.DataFrame]:
     """Run the simulator. scores: [date, ticker, score]; market: see build_market.
+
+    Scores dated t are executed at the close `execution_lag` trading days
+    later (on the market calendar). Spread costs come from the market's
+    `half_spread` column when present; rows without a usable book fall back to
+    `default_half_spread_bps`, and pathological books are capped at
+    `max_half_spread_bps`. A market with no `half_spread` column charges no
+    spread (commission-only), which keeps synthetic-market tests exact.
 
     Returns (metrics-ready daily DataFrame is the second element):
         daily columns: date, gross, cost, net, turnover, n_held, n_stuck, cash,
@@ -46,6 +63,20 @@ def simulate_long_only(
     """
     buy_c, sell_c = buy_cost_bps / 1e4, sell_cost_bps / 1e4
     rf_d = (1.0 + rf_annual) ** (1.0 / TRADING_DAYS) - 1.0
+
+    scores = scores[["date", "ticker", "score"]].copy()
+    if execution_lag:
+        cal = np.sort(market["date"].unique())
+        pos = np.searchsorted(cal, scores["date"].to_numpy())
+        tgt = pos + execution_lag
+        ok = tgt < len(cal)
+        scores = scores.loc[ok].assign(date=cal[tgt[ok]])
+    if scores.empty:
+        raise ValueError("no executable scores (all past the end of the market calendar)")
+
+    has_spread = "half_spread" in market.columns
+    default_hs = default_half_spread_bps / 1e4 if has_spread else 0.0
+    max_hs = max_half_spread_bps / 1e4
 
     score_by_day = {pd.Timestamp(d): g for d, g in scores.groupby("date")}
     first_day = scores["date"].min()
@@ -63,6 +94,7 @@ def simulate_long_only(
             "ret": dict(zip(g["ticker"], g["ret"])),
             "can_buy": set(g.loc[g["can_buy"], "ticker"]),
             "can_sell": set(g.loc[g["can_sell"], "ticker"]),
+            "hs": dict(zip(g["ticker"], g["half_spread"])) if has_spread else {},
         }
         for d, g in m[m["date"].isin(sim_days)].groupby("date")
     }
@@ -75,8 +107,14 @@ def simulate_long_only(
     rows = []
 
     for d in sim_days:
-        day = by_day.get(d, {"ret": {}, "can_buy": set(), "can_sell": set()})
+        day = by_day.get(d, {"ret": {}, "can_buy": set(), "can_sell": set(), "hs": {}})
         rets, can_buy, can_sell = day["ret"], day["can_buy"], day["can_sell"]
+        hs_day = day["hs"]
+
+        def hs(t):
+            """Per-side spread cost for ticker t at today's close."""
+            v = hs_day.get(t)
+            return min(v, max_hs) if v is not None and np.isfinite(v) else default_hs
 
         # ---- 1. mark the book: apply day d returns to yesterday's holdings ----
         gross = cash * rf_d
@@ -118,7 +156,7 @@ def simulate_long_only(
                 if t in can_sell:
                     sold = w.pop(t)
                     cash += sold
-                    cost += sold * sell_c
+                    cost += sold * (sell_c + hs(t))
                     turnover += sold
             stuck_w = sum(v for t, v in w.items() if t not in target_set)
 
@@ -132,12 +170,12 @@ def simulate_long_only(
                     if buy > 0:
                         w[t] = cur + buy
                         cash -= buy
-                        cost += buy * buy_c
+                        cost += buy * (buy_c + hs(t))
                         turnover += buy
                 elif delta < -1e-12 and t in can_sell:
                     w[t] = w_star
                     cash += -delta
-                    cost += -delta * sell_c
+                    cost += -delta * (sell_c + hs(t))
                     turnover += -delta
 
         net = gross - cost

@@ -15,11 +15,18 @@ quantities (momentum, forward target), so they are split-consistent too.
 Cash dividends are NOT adjusted for (no dividend data in the summary); returns
 are price returns.
 
-The forward target is only defined when the NEXT calendar trading day (global
-exchange calendar) has a row for the ticker AND the ticker actually trades on
-it. A "next-day" return that silently spans a 3-week suspension, or marks a
-stale price, would otherwise leak into training. `fwd_gap` records the actual
-day distance for diagnostics.
+Execution timing (correctness-critical)
+---------------------------------------
+Features at day t use day-t CLOSING data (close, foreign flow, end-of-day
+book), so an order informed by them cannot execute at that same close. The
+target therefore models: decide after the close of t, execute at the close of
+t + `execution_lag` (default 1), exit at t + execution_lag + `horizon`. Every
+day involved must be a strictly consecutive calendar trading day and the
+ticker must actually trade at entry and exit -- a label that silently spans a
+3-week suspension, or marks a stale price, would otherwise leak into training.
+`fwd_gap` records the actual entry->exit day distance for diagnostics.
+`execution_lag=0` recovers the same-close (MOC) convention; use it only for
+signal-decay diagnostics, never for headline results.
 
 Sample validity: `traded` (volume > 0 today) and `valid_day` (traded AND in the
 liquid universe, see market.apply_universe) are carried through; the datasets
@@ -140,15 +147,17 @@ def calendar_positions(dates: pd.Series, all_dates: np.ndarray | None = None) ->
     return dates.map(cal).astype(np.int64)
 
 
-def compute_features(panel: pd.DataFrame, horizon: int = 1) -> pd.DataFrame:
+def compute_features(panel: pd.DataFrame, horizon: int = 1, execution_lag: int = 1) -> pd.DataFrame:
     """Compute the full causal feature superset + forward-return target.
 
     All per-asset series use groupby(ticker) so shifts/rollings never cross
     tickers. Return-based quantities come from the split-adjusted log-price
-    path (see module docstring). The target is the forward log return over
-    `horizon` STRICTLY CONSECUTIVE calendar trading days ending on a day the
-    ticker actually trades; anything else (suspension gap, stale price,
-    delisting) is NaN and never becomes a training label.
+    path (see module docstring). The target is the log return from the close
+    of t+`execution_lag` (entry) to the close of t+`execution_lag`+`horizon`
+    (exit) over STRICTLY CONSECUTIVE calendar trading days, with the ticker
+    actually trading at entry and exit; anything else (suspension gap, stale
+    price, delisting) is NaN and never becomes a training label. See the
+    module docstring for why execution_lag defaults to 1.
     """
     df = panel.sort_values(["ticker", "date"]).copy()
     df["_pos"] = calendar_positions(df["date"])
@@ -205,14 +214,18 @@ def compute_features(panel: pd.DataFrame, horizon: int = 1) -> pd.DataFrame:
     else:
         df["book_imbalance"] = np.nan
 
-    # --- target: forward log return over `horizon` consecutive trading days ---
+    # --- target: enter at close(t+lag), exit at close(t+lag+horizon) ---
     gt = df.groupby("ticker", sort=False)
-    fwd_alp = gt["_alp"].shift(-horizon)
-    fwd_pos = gt["_pos"].shift(-horizon)
-    fwd_traded = gt["traded"].shift(-horizon).fillna(False).astype(bool)
-    df["fwd_gap"] = fwd_pos - df["_pos"]
-    contiguous = df["fwd_gap"] == horizon
-    df[TARGET_COLUMN] = (fwd_alp - df["_alp"]).where(contiguous & fwd_traded)
+    k_in, k_out = execution_lag, execution_lag + horizon
+    entry_alp = gt["_alp"].shift(-k_in)
+    entry_pos = gt["_pos"].shift(-k_in)
+    entry_traded = gt["traded"].shift(-k_in).fillna(False).astype(bool)
+    exit_alp = gt["_alp"].shift(-k_out)
+    exit_pos = gt["_pos"].shift(-k_out)
+    exit_traded = gt["traded"].shift(-k_out).fillna(False).astype(bool)
+    df["fwd_gap"] = exit_pos - df["_pos"]
+    contiguous = (entry_pos - df["_pos"] == k_in) & (df["fwd_gap"] == k_out)
+    df[TARGET_COLUMN] = (exit_alp - entry_alp).where(contiguous & entry_traded & exit_traded)
 
     # Sample validity today: must have traded (stale prices are unbuyable noise).
     # market.apply_universe() further ANDs a liquidity screen into valid_day.

@@ -16,13 +16,15 @@ Splits (cfg["split"]):
         out-of-sample series before the backtest.
 
 Evaluation is the stateful simulator (src/backtest.py): ARA/ARB tradability,
-suspensions held not deleted, buy/sell costs incl. sell tax, cash at rf,
-metrics in excess of rf plus alpha/beta/IR vs the IHSG proxy.
+suspensions held not deleted, buy/sell costs incl. sell tax PLUS per-name
+half-spread from the closing book, cash at rf, metrics in excess of rf plus
+alpha/beta/IR vs the IHSG proxy.
 
 Execution convention: signals computed from day-t closing data are executed at
-that same close (MOC). This is the standard close-to-close research assumption;
-tradability filters (no buys at ARA, no sells at ARB, no fills in names that
-did not trade) keep it honest.
+the close of t + window.execution_lag (default 1) -- you cannot trade the very
+close your features are computed from. Training labels and the simulator share
+the same lag, so the model is trained on the return it can actually capture.
+Set execution_lag: 0 only for signal-decay diagnostics (same-close MOC).
 
 Usage
 -----
@@ -60,7 +62,8 @@ def _load_data(cfg, active):
         panel = panel[panel["date"] >= pd.Timestamp(dcfg["start"])]
     if dcfg.get("end"):
         panel = panel[panel["date"] <= pd.Timestamp(dcfg["end"])]
-    feats = compute_features(panel, horizon=wcfg.get("horizon", 1))
+    feats = compute_features(panel, horizon=wcfg.get("horizon", 1),
+                             execution_lag=wcfg.get("execution_lag", 1))
     feats = apply_universe(feats, panel, cfg.get("universe"))
     feats = normalize(
         feats,
@@ -204,6 +207,7 @@ def run(config_path: str, overrides: dict | None = None) -> dict:
     pcfg = cfg.get("portfolio", {})
     ccfg = cfg.get("costs", {})
     rf_annual = ccfg.get("rf_annual", 0.055)
+    execution_lag = cfg["window"].get("execution_lag", 1)
     metrics, daily = simulate_long_only(
         scores, market,
         top_n=pcfg.get("top_n", 10),
@@ -212,7 +216,11 @@ def run(config_path: str, overrides: dict | None = None) -> dict:
         rf_annual=rf_annual,
         delist_after=pcfg.get("delist_after", 20),
         delist_return=pcfg.get("delist_return", -0.5),
+        execution_lag=execution_lag,
+        default_half_spread_bps=ccfg.get("default_half_spread_bps", 35.0),
+        max_half_spread_bps=ccfg.get("max_half_spread_bps", 200.0),
     )
+    metrics["execution_lag"] = execution_lag
     # --- benchmark vs IHSG buy-and-hold over the SAME dates (long-only beta) ---
     bm = benchmark_metrics(ihsg, dates=daily["date"])
     metrics.update(bm)
