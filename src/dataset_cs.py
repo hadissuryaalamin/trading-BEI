@@ -31,6 +31,7 @@ class IDXCrossSectionalDataset(Dataset):
         require_target: bool = True,
         min_stocks: int = 20,
         feature_cols: list[str] | None = None,
+        day_stride: int = 1,
     ):
         self.lookback = lookback
         self.feature_cols = list(feature_cols) if feature_cols is not None else list(FEATURE_COLUMNS)
@@ -70,6 +71,12 @@ class IDXCrossSectionalDataset(Dataset):
 
         # keep only days with enough names to form a cross-section
         self.days = sorted(d for d, items in by_day.items() if len(items) >= min_stocks)
+        # day_stride > 1 = a slower trading cadence (e.g. 5 = weekly): keep every
+        # k-th eligible day, so consecutive dataset entries are one rebalance
+        # PERIOD apart -- train_dlsa's day-over-day costs then model weekly
+        # turnover, and the simulator only sees (and trades) these dates.
+        if day_stride > 1:
+            self.days = self.days[::day_stride]
         self.by_day = by_day
 
     def __len__(self) -> int:

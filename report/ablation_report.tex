@@ -23,19 +23,25 @@ Statistical Arbitrage on IDX Equities}}
 
 \begin{abstract}
 \noindent
-We describe the experimental design for determining the optimal number
+We describe the experimental setup for determining the optimal number
 and composition of input features for a deep learning statistical
 arbitrage (DLSA) strategy on Indonesia Stock Exchange (IDX) equities.
 Unlike the original DLSA pipeline, no factor model is used: normalized
-raw features are fed directly into a Transformer that learns
-representation and trading signal end-to-end. Because the deployed
-strategy is \emph{long-only}, it carries market beta and is therefore
-benchmarked against a buy-and-hold IHSG index. We propose a nested,
-group-wise ablation across five economically motivated feature groups,
-run over eight random seeds per configuration, and evaluated on strictly
-time-ordered walk-forward out-of-sample data. The optimal feature set is
-identified as the point at which the walk-forward Sharpe ratio saturates
-before additional features degrade performance through overfitting.
+raw features are fed directly into a two-stage cross-sectional
+Transformer --- temporal self-attention over each stock's 60-day window,
+then self-attention \emph{across} all stocks on a given day --- that
+learns representation and trading signal end-to-end. The model is trained
+with a DLSA-style economic objective: maximize the annualized Sharpe
+ratio of a long-only softmax portfolio, \emph{net} of transaction costs,
+over blocks of consecutive trading days so that turnover is genuinely
+penalized. Because the deployed strategy is \emph{long-only}, it carries
+market beta and is therefore benchmarked against a buy-and-hold IHSG
+index. We use a nested, group-wise ablation across five economically
+motivated feature groups, run over eight random seeds per configuration,
+and evaluated on strictly time-ordered walk-forward out-of-sample data.
+The optimal feature set is identified as the point at which the
+walk-forward Sharpe ratio saturates before additional features degrade
+performance through overfitting.
 \end{abstract}
 
 \section{Introduction}
@@ -53,18 +59,51 @@ trading days, also increases the risk of overfitting. This report
 specifies a controlled ablation study to locate the optimal feature
 count and composition.
 
+\section{Objective}
+The project has two nested objectives. The \emph{research} objective is
+to identify how many and which input features maximize risk-adjusted
+out-of-sample performance under realistic IDX trading frictions --- the
+ablation reported here. The \emph{model} objective, optimized during
+training, is economic rather than statistical: rather than regressing
+next-day returns, the network directly maximizes the annualized Sharpe
+ratio of the long-only portfolio it induces, net of transaction costs.
+Formally, for a block of consecutive rebalance periods the training loss
+is $-\mathrm{Sharpe}$ of the net excess-return series (Section~7). This
+aligns the training signal with what is actually traded and evaluated,
+and --- because costs are charged inside the block --- makes the model
+pay for churn. The headline decision criterion for the ablation is the
+walk-forward net Sharpe of the traded top-$N$ rule; cumulative return
+versus a buy-and-hold IHSG benchmark, maximum drawdown, and turnover are
+reported alongside it.
+
 \section{Data}
 The raw input is the IDX daily \emph{Ringkasan Saham} (stock summary),
-one record per (date, ticker), spanning approximately five years
-(2020--2025). After cleaning, the panel retains $19$ columns including
-OHLC prices, previous close, volume, value, trade frequency, foreign
-buy/sell, listed and tradeable shares, and end-of-day bid/offer.
+one record per (date, ticker), spanning roughly six years
+(2020-07 to 2026-07). After cleaning, the panel retains OHLC prices,
+previous close, volume, value, trade frequency, foreign buy/sell, listed
+and tradeable shares, and end-of-day bid/offer with sizes. A single
+processed \texttt{panel.parquet} feeds all experiments.
 
-Two data-quality issues are noted. First, the previously built
-\texttt{panel.parquet} is corrupt (unreadable footer) and must be
-regenerated. Second, the raw \texttt{OpenPrice} field is frequently
-zero; open-based features must fall back to the previous close or be
-flagged invalid to avoid dropping large numbers of rows.
+\paragraph{Universe.} A causal liquidity screen is applied: a name is
+tradable on day $t$ only if its trailing 20-day \emph{median} daily
+traded value is at least $1$ billion IDR (\texttt{market.apply\_universe}).
+This keeps penny stocks out of both the tradable set and the per-day
+z-score statistics.
+
+\paragraph{Corporate actions.} IDX's raw \texttt{close} is not
+split-adjusted, but the reported \texttt{Previous} (prev\_close) is
+adjusted on the ex-date, so daily returns use $\ln(C_t/\text{prev}_t)$
+(falling back to the lagged close), turning a $1{:}10$ split into a
+$\approx 0\%$ return rather than a spurious $-90\%$. An adjusted
+log-price path drives all multi-day quantities so momentum and the
+forward target are split-consistent.
+
+\paragraph{Data-quality guards.} The raw \texttt{OpenPrice} is frequently
+zero; open-based and range features mask non-positive prices to
+\texttt{NaN} (later neutralized to $0$ after standardization) rather than
+dropping rows. Rows are dropped only when the core feature
+(\texttt{log\_return}) is missing, so the sample set is invariant to
+which optional feature groups are active.
 
 \section{Strategy Setting}
 The strategy is \emph{long-only}: positions lie in $[0,1]$ rather than
@@ -79,6 +118,88 @@ not an absolute Sharpe threshold. We recommend training with the full
 cross-sectional signal (allowing the model to learn both out- and
 under-performers) and applying the long-only constraint only at the
 portfolio-construction stage.
+
+\section{Model Architecture}
+The flagship model is a \emph{cross-sectional} Transformer
+(\texttt{models/cross\_sectional.py}) that processes one trading day at a
+time. Its input is the tensor of all $N$ eligible stocks on that day,
+each with a $T{=}60$-day lookback window of $F$ standardized features,
+shape $(N, T, F)$; the output is one score per stock, $(N,)$, which is
+ranked to select the long book. The forward pass has three stages:
+
+\begin{enumerate}
+\item \textbf{Input projection + temporal encoding.} A linear map
+$\mathbb{R}^{F}\!\to\!\mathbb{R}^{d}$ plus a learned positional embedding
+over the $T$ time steps. A stack of \texttt{temporal\_layers} standard
+Transformer encoder layers applies self-attention \emph{over the 60 days}
+of each stock independently, yielding a $(N, T, d)$ tensor.
+\item \textbf{Pooling.} The last time step is taken (\texttt{pooling:
+last}), collapsing each stock to a single $d$-dimensional vector, $(N,
+d)$.
+\item \textbf{Cross-sectional encoding + head.} The $N$ stock vectors are
+treated as an unordered set (no positional encoding) and passed through
+\texttt{cross\_layers} Transformer encoder layers of self-attention
+\emph{across stocks}, so each stock's representation is informed by the
+whole market that day. A \texttt{LayerNorm} + linear head emits one
+scalar score per stock.
+\end{enumerate}
+
+The cross-sectional stage is the key departure from the per-stock
+baseline Transformer (\texttt{models/transformer.py}), which scores each
+stock in isolation; here scoring is a \emph{relative} comparison across
+the day's cross-section, and there is no factor model --- attention runs
+directly on normalized raw features. Table~\ref{tab:arch} lists the
+architecture hyperparameters, held fixed across all ablation experiments.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Architecture and optimization settings (locked across A--E).}
+\label{tab:arch}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Setting & Value \\
+\midrule
+Model width $d_{\text{model}}$ & 64 \\
+Attention heads & 4 \\
+Temporal / cross layers & 2 / 2 \\
+Feed-forward dim & 128 \\
+Dropout & 0.1 \\
+Lookback $T$ / horizon & 60 / 1 \\
+Pooling & last step \\
+\midrule
+Optimizer & Adam \\
+Learning rate & $3\!\times\!10^{-4}$ \\
+Weight decay & $1\!\times\!10^{-5}$ \\
+Epochs (max) & 40 \\
+Early-stop patience & 8 \\
+Batch granularity & 1 day / step \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Training Objective}
+The model is trained with a DLSA-style economic objective
+(\texttt{train\_dlsa}) rather than regression. Each gradient step draws a
+block of $K{=}32$ \emph{consecutive} trading days. On each day the model
+scores every stock; a softmax over the cross-section (temperature
+$\tau{=}0.1$, concentrating weight like the traded top-$N$ book) produces
+long-only weights $w \in [0,1]^{N}$ that sum to one. An extra always-zero
+``cash'' logit (\texttt{allow\_cash}) lets the portfolio retreat to the
+risk-free rate. Day-over-day weight changes within the block, aligned by
+ticker, are charged asymmetric buy/sell costs, and the loss is the
+negative annualized Sharpe of the block's \emph{net} excess returns:
+\[
+\mathcal{L} = -\,\frac{\overline{r}^{\,\text{net}} - r_f}
+{\mathrm{std}(r^{\text{net}})}\,\sqrt{A},
+\qquad
+r^{\text{net}}_t = w_t^{\!\top} \rho_t - c_t,
+\]
+where $\rho_t$ are simple returns, $c_t$ the ticker-aligned turnover
+cost, and $A$ the number of rebalance periods per year. Model selection
+and early stopping use the net Sharpe of the \emph{actually traded} rule
+--- top-$N$ equal weight after costs --- on the validation days, so the
+model selected is the one truly traded, not the softmax portfolio.
 
 \section{Feature Groups}
 Ablation is performed over \emph{groups} of economically related
@@ -145,12 +266,40 @@ each group's marginal contribution.
 
 \section{Experimental Controls}
 For the comparison to be valid, \emph{only the active feature list} may
-differ between experiments. All of the following are held identical:
-Transformer architecture ($d_{\text{model}}$, layers, heads, dropout);
-lookback $T$ and target horizon; walk-forward split dates; transaction
-cost (bps), turnover penalty, and long-only constraint; epochs, learning
-rate, and early-stopping rule; and the seed grid. Without these
-controls, differences in Sharpe cannot be attributed to features.
+differ between experiments. Every other knob is locked in a shared base
+config (\texttt{configs/ablation/\_base.yaml}); experiments A--E inherit
+it and override only \texttt{experiment\_name} and
+\texttt{feature\_groups}. Held identical are: the architecture and
+optimization settings of Table~\ref{tab:arch}; the lookback $T{=}60$ and
+horizon; the walk-forward split dates; the long-only, top-$N{=}10$
+portfolio construction; the transaction-cost and turnover model; and the
+seed grid. Without these controls, differences in Sharpe cannot be
+attributed to features.
+
+\paragraph{Walk-forward splits.} Evaluation uses a rolling retrain. The
+out-of-sample period begins 2024-07-01 and is covered by four folds of
+six months each; every fold trains up to a six-month validation window
+placed immediately before its test period, trades the next six months
+out-of-sample, then rolls forward. Model weights are re-initialized with
+an identical seed per fold so differences come from data, not
+initialization, and the four folds' test scores are stitched into one
+two-year out-of-sample series before backtesting.
+
+\paragraph{Execution timing.} Features on day $t$ use day-$t$ closing
+data, so orders informed by them cannot execute at that same close. The
+target and the simulator share an execution lag of one day: decide after
+the close of $t$, execute at the close of $t{+}1$, over strictly
+consecutive trading days on which the name actually trades. This closes
+the most common look-ahead leak; \texttt{execution\_lag}${=}0$ (same-close
+MOC) is reserved for signal-decay diagnostics only.
+
+\paragraph{Costs.} IDX round-trip frictions are modeled as $15$ bps
+commission on the buy side and $25$ bps on the sell side (commission plus
+sell tax), against a risk-free rate of $5.5\%$ (Sharpe is computed in
+excess of it). The realistic simulator additionally charges each name's
+own closing half-spread (default $35$ bps when the book is empty, capped
+at $200$ bps); the training loss uses the effective commission-plus-typical-spread
+number so it is not double-counted.
 
 \section{Evaluation}
 Evaluation is out-of-sample (walk-forward), never training loss. The

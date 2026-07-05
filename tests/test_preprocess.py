@@ -131,6 +131,32 @@ def test_target_is_the_lagged_next_day_return(simple_panel):
     np.testing.assert_allclose(got[ok], nxt[ok], atol=1e-10)
 
 
+def test_weekly_horizon_target(simple_panel):
+    """horizon=5, lag=1: fwd_return at t = sum of the daily log returns
+    realized on days t+2 .. t+6 (enter close t+1, exit close t+6)."""
+    feats = compute_features(simple_panel, horizon=5)
+    a = feats[feats["ticker"] == "AAAA"].reset_index(drop=True)
+    lr = a["log_return"].to_numpy()
+    got = a[TARGET_COLUMN].to_numpy()
+    for t in range(len(a) - 6):
+        if np.isfinite(got[t]):
+            np.testing.assert_allclose(got[t], lr[t + 2 : t + 7].sum(), atol=1e-10)
+    assert np.isfinite(got[: len(a) - 6]).sum() > 15
+    assert np.isnan(got[-6:]).all()          # tail has no complete entry->exit window
+
+
+def test_cs_dataset_day_stride(simple_panel):
+    """day_stride=k keeps every k-th eligible day (weekly cadence = 5)."""
+    pytest.importorskip("torch")
+    from src.dataset_cs import IDXCrossSectionalDataset
+
+    feats = normalize(compute_features(simple_panel))
+    d1 = IDXCrossSectionalDataset(feats, lookback=10, min_stocks=2)
+    d5 = IDXCrossSectionalDataset(feats, lookback=10, min_stocks=2, day_stride=5)
+    assert len(d1) > 10
+    assert d5.days == d1.days[::5]
+
+
 def test_execution_lag_zero_is_same_close_convention(simple_panel):
     """execution_lag=0 (diagnostics only) recovers target = return on t+1."""
     feats = compute_features(simple_panel, execution_lag=0)

@@ -117,13 +117,18 @@ def backtest_long_only(
     buy_cost_bps: float = 15.0,
     sell_cost_bps: float = 25.0,
     rf_annual: float = 0.055,
+    period_days: int = 1,
 ):
-    """Daily long-only top-N on the labels in `scores` [date,ticker,score,fwd_return].
+    """Long-only top-N on the labels in `scores` [date,ticker,score,fwd_return].
 
     Frictionless-execution approximation (no ARA/ARB or suspension modelling --
     use src.backtest.simulate_long_only for the real evaluation). Used for
     validation-time model selection, where speed matters and the relative
     ordering of models is what counts.
+
+    `period_days` is the rebalance cadence the score dates were sampled at
+    (e.g. 5 for weekly): each row of the result is one PERIOD, and metrics are
+    annualized at 252/period_days periods per year.
 
     Returns (metrics: dict, daily: DataFrame).
     """
@@ -146,7 +151,8 @@ def backtest_long_only(
     d = pd.DataFrame(daily, columns=["date", "gross", "cost", "net", "turnover"]).sort_values("date")
     d["equity"] = (1 + d["net"]).cumprod()
     d["n_stuck"] = 0
-    return compute_metrics(d, rf_annual=rf_annual), d
+    ann = max(1, round(TRADING_DAYS / period_days))
+    return compute_metrics(d, rf_annual=rf_annual, ann=ann), d
 
 
 # --------------------------------------------------------------------------- #
@@ -227,14 +233,19 @@ def predict_scores_cs(model, ds, device="cpu") -> pd.DataFrame:
 def train_dlsa(model, train_ds, val_ds, cfg, device="cpu", top_n: int = 10):
     """End-to-end economic objective (DLSA-style), long-only, cost-aware.
 
-    Each gradient step takes a block of `days_per_step` CONSECUTIVE trading
-    days. Per day the model scores every stock; softmax over the cross-section
-    (temperature `softmax_temp`; with `allow_cash` an extra always-zero logit
-    lets the portfolio retreat to cash at the risk-free rate) gives long-only
-    weights. Day-over-day weight changes within the block are charged
-    buy/sell costs (aligned by ticker), and the loss is the negative Sharpe of
-    the block's NET returns in excess of rf. Trained this way the model pays
-    for churning, unlike a gross-Sharpe objective.
+    Each gradient step takes a block of `days_per_step` CONSECUTIVE dataset
+    entries. Per entry the model scores every stock; softmax over the
+    cross-section (temperature `softmax_temp`; with `allow_cash` an extra
+    always-zero logit lets the portfolio retreat to cash at the risk-free
+    rate) gives long-only weights. Entry-over-entry weight changes within the
+    block are charged buy/sell costs (aligned by ticker), and the loss is the
+    negative Sharpe of the block's NET returns in excess of rf. Trained this
+    way the model pays for churning, unlike a gross-Sharpe objective.
+
+    `period_days` in cfg (default 1) is the rebalance cadence: with a
+    day_stride-ed dataset (e.g. every 5th day, 5-day labels) consecutive
+    entries are one WEEK apart, so the charged turnover, the per-period rf,
+    and the Sharpe annualization all describe the weekly strategy.
 
     Early stopping / model selection uses the net Sharpe of the ACTUAL traded
     rule -- top-N equal weight after costs -- on the validation days, not the
@@ -252,8 +263,9 @@ def train_dlsa(model, train_ds, val_ds, cfg, device="cpu", top_n: int = 10):
     buy_c = cfg.get("buy_cost_bps", 15.0) / 1e4
     sell_c = cfg.get("sell_cost_bps", 25.0) / 1e4
     rf_annual = cfg.get("rf_annual", 0.055)
-    rf_d = (1.0 + rf_annual) ** (1.0 / TRADING_DAYS) - 1.0
-    ann = TRADING_DAYS
+    period_days = int(cfg.get("period_days", 1))
+    rf_d = (1.0 + rf_annual) ** (period_days / TRADING_DAYS) - 1.0  # rf per period
+    ann = TRADING_DAYS / period_days                                # periods per year
     patience = cfg.get("early_stop_patience", 8)
     best, best_state, bad = -1e18, None, 0
     starts = list(range(0, max(len(train_ds) - 1, 1), K))  # block starts (consecutive days inside)
@@ -322,6 +334,7 @@ def train_dlsa(model, train_ds, val_ds, cfg, device="cpu", top_n: int = 10):
         val_sharpe = _eval_topn_net_sharpe(
             model, val_ds, device, top_n=top_n,
             buy_cost_bps=buy_c * 1e4, sell_cost_bps=sell_c * 1e4, rf_annual=rf_annual,
+            period_days=period_days,
         )
         print(f"epoch {epoch:03d} | train_loss {np.mean(losses):.4f} | "
               f"val_topN_net_sharpe {val_sharpe:.4f} | {time.perf_counter() - t_ep:.1f}s")
@@ -339,7 +352,8 @@ def train_dlsa(model, train_ds, val_ds, cfg, device="cpu", top_n: int = 10):
     return model
 
 
-def _eval_topn_net_sharpe(model, ds, device, top_n, buy_cost_bps, sell_cost_bps, rf_annual):
+def _eval_topn_net_sharpe(model, ds, device, top_n, buy_cost_bps, sell_cost_bps, rf_annual,
+                          period_days=1):
     """Validation metric: net Sharpe of the traded rule (top-N after costs)."""
     if len(ds) == 0:
         return 0.0
@@ -347,5 +361,6 @@ def _eval_topn_net_sharpe(model, ds, device, top_n, buy_cost_bps, sell_cost_bps,
     m, _ = backtest_long_only(
         scores, top_n=top_n,
         buy_cost_bps=buy_cost_bps, sell_cost_bps=sell_cost_bps, rf_annual=rf_annual,
+        period_days=period_days,
     )
     return float(m.get("sharpe", 0.0))

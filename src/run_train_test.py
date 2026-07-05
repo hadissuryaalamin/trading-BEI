@@ -128,11 +128,21 @@ def _train_one_fold(cfg, fold, feats, active, device):
     objective = cfg["train"].get("objective", "regression")
     lookback = cfg["window"]["lookback"]
     ccfg = cfg.get("costs", {})
+    # rebalance_every > 1 = slower cadence (5 = weekly). Applies to the per-day
+    # (cross-sectional / sharpe) path: datasets are strided so consecutive
+    # entries are one period apart, and the training objective charges turnover
+    # per period. Pair it with window.horizon = rebalance_every so the label
+    # covers the actual holding period.
+    rebalance_every = int(cfg.get("portfolio", {}).get("rebalance_every", 1))
     tcfg = {
         **cfg["train"],
-        "buy_cost_bps": ccfg.get("buy_bps", 15.0),
-        "sell_cost_bps": ccfg.get("sell_bps", 25.0),
+        # training loss uses EFFECTIVE costs (commission + typical spread) via
+        # train_*_bps; the simulator charges commission + each name's real
+        # spread itself, so giving it the effective number would double-count
+        "buy_cost_bps": ccfg.get("train_buy_bps", ccfg.get("buy_bps", 15.0)),
+        "sell_cost_bps": ccfg.get("train_sell_bps", ccfg.get("sell_bps", 25.0)),
         "rf_annual": ccfg.get("rf_annual", 0.055),
+        "period_days": rebalance_every,
     }
     per_day = objective == "sharpe" or model_name == "cross_sectional"
     top_n = cfg.get("portfolio", {}).get("top_n", 10)
@@ -142,11 +152,12 @@ def _train_one_fold(cfg, fold, feats, active, device):
 
     if per_day:
         from .dataset_cs import IDXCrossSectionalDataset as DS
-        tr = DS(feats, lookback, end=fold["train_end"], feature_cols=active)
+        tr = DS(feats, lookback, end=fold["train_end"], feature_cols=active,
+                day_stride=rebalance_every)
         va = DS(feats, lookback, start=fold["train_end"] + pd.Timedelta(days=1),
-                end=fold["val_end"], feature_cols=active)
+                end=fold["val_end"], feature_cols=active, day_stride=rebalance_every)
         te = DS(feats, lookback, start=fold["test_start"], end=fold["test_end"],
-                feature_cols=active)
+                feature_cols=active, day_stride=rebalance_every)
         print(f"days: train={len(tr)} val={len(va)} test={len(te)}")
         if objective == "sharpe":
             tt.train_dlsa(model, tr, va, tcfg, device=device, top_n=top_n)

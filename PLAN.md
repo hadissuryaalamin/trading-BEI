@@ -225,3 +225,25 @@ dari Sharpe +1.12 menjadi −3.3. Tiga perbaikan:
 
 Konsekuensi: SEMUA hasil di `results/` sebelum tanggal ini tidak valid dan
 harus di-train ulang (label berubah, bukan sekadar simulasi ulang).
+
+## Update 2026-07-04 (3) — cadence mingguan + baseline tanpa training
+
+Run jujur pertama (harian): −96,9% vs IHSG −19,8%. Dekomposisi: biaya 52bps/hari
+(turnover 92%/hari × round trip ~125bps) + sinyal gross yang negatif di t+1.
+Kesimpulan aritmetika: cadence harian butuh alpha gross ~13%/bulan hanya untuk
+impas — mustahil. Mingguan menurunkan break-even ke ~2–2,5%/bulan.
+
+Dukungan cadence yang ditambahkan:
+1. `IDXCrossSectionalDataset(day_stride=k)` — ambil tiap hari ke-k; entri
+   berurutan = satu periode rebalance, jadi biaya turnover di `train_dlsa`
+   dihitung antar-MINGGU, dan simulator hanya menerima (dan mentradingkan)
+   tanggal-tanggal itu.
+2. `train_dlsa` / `backtest_long_only`: `period_days` — rf per periode dan
+   annualisasi Sharpe 252/period.
+3. Pemisahan biaya training vs simulasi: `costs.train_buy_bps/train_sell_bps`
+   (efektif, komisi+spread tipikal ~60/70bps) untuk loss; simulator tetap
+   komisi 15/25 + half-spread riil per nama (kalau tidak dipisah = dobel).
+4. `configs/cross_sectional_weekly.yaml`: horizon 5, rebalance_every 5,
+   biaya training jujur.
+5. `baseline_momentum.py`: baseline tanpa training (top-N by mom_20, cadence
+   sama, simulator sama) — garis yang harus dikalahkan model apa pun.
