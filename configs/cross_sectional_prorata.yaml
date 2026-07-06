@@ -1,0 +1,64 @@
+# Cross-sectional transformer + positive-score Top-N pro-rata portfolio.
+# Same model/objective as cross_sectional.yaml; only the portfolio rule differs.
+# Needs train.allow_cash: true so "score > 0" means "above the cash anchor".
+experiment_name: cross_sectional_prorata
+seed: 42
+
+data:
+  panel: data/processed/panel.parquet
+  start: 2020-07-01
+  end: 2026-07-02
+
+universe:                    # causal liquidity screen (market.apply_universe)
+  min_value_idr: 1_000_000_000   # trailing 20d MEDIAN daily traded value >= 1B IDR
+  window: 20
+
+split:
+  mode: walk_forward
+  walk_forward:
+    test_start: 2024-07-01   # 4 folds of 6 months -> 2y stitched out-of-sample
+    step_months: 6
+    val_months: 6
+
+features:
+  feature_groups: [G1, G2, G3, G4, G5]
+  normalize: cross_sectional_zscore
+
+window:
+  lookback: 60
+  horizon: 1
+  execution_lag: 1           # decide at close t, execute at close t+1
+
+model:
+  name: cross_sectional
+  d_model: 64
+  n_heads: 4
+  temporal_layers: 2         # attention over the 60 days
+  cross_layers: 2            # attention across stocks
+  dim_ff: 128
+  dropout: 0.1
+  pooling: last
+
+train:
+  epochs: 40
+  batch_size: 1              # one day per step (all stocks that day)
+  lr: 0.0003
+  weight_decay: 0.00001
+  early_stop_patience: 8
+  objective: sharpe          # DLSA-style: maximize long-only NET portfolio Sharpe
+  days_per_step: 32          # (sharpe) CONSECUTIVE days per gradient step
+  softmax_temp: 0.1
+  allow_cash: true           # REQUIRED: cash anchor at logit 0 makes score>0 meaningful
+
+costs:
+  buy_bps: 15
+  sell_bps: 25
+  rf_annual: 0.055
+  default_half_spread_bps: 35
+  max_half_spread_bps: 200
+
+portfolio:
+  strategy: long_only_positive_topn_prorata   # score>0 -> top-N -> pro-rata by score
+  top_n: 10
+  delist_after: 20
+  delist_return: -0.5
