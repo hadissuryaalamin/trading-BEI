@@ -10,7 +10,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.backtest import simulate_long_only, compute_metrics
+from src.backtest import (
+    simulate_long_only,
+    compute_metrics,
+    STRATEGY_POSITIVE_TOPN_PRORATA,
+)
 
 
 def mk_market(rows):
@@ -212,6 +216,42 @@ def test_no_spread_column_means_no_spread_cost():
     m, daily = simulate_long_only(scores, market, top_n=1, buy_cost_bps=15,
                                   sell_cost_bps=0, rf_annual=0.0, execution_lag=0)
     assert daily.iloc[0]["cost"] == pytest.approx(1.0 * 15e-4)
+
+
+def test_prorata_strategy_weights_book_by_score():
+    """Positive-score pro-rata: buy weights ~ score, cost = weight bought."""
+    market = mk_market([
+        (D1, "AAAA", 0.0, True, True), (D1, "BBBB", 0.0, True, True),
+        (D1, "CCCC", 0.0, True, True),
+        (D2, "AAAA", 0.0, True, True), (D2, "BBBB", 0.0, True, True),
+        (D2, "CCCC", 0.0, True, True),
+    ])
+    # A=3, B=1 positive -> weights 0.75/0.25; C negative -> excluded (cash-free)
+    scores = mk_scores([(D1, "AAAA", 3.0), (D1, "BBBB", 1.0), (D1, "CCCC", -2.0)])
+    m, daily = simulate_long_only(scores, market, top_n=10, buy_cost_bps=10,
+                                  sell_cost_bps=0, rf_annual=0.0, execution_lag=0,
+                                  strategy=STRATEGY_POSITIVE_TOPN_PRORATA)
+    # invested 0.75 + 0.25 = 1.0 of equity; cost = 1.0 * 10bps; no cash left
+    assert daily.iloc[0]["cost"] == pytest.approx(1.0 * 10e-4)
+    assert daily.iloc[0]["turnover"] == pytest.approx(1.0)
+    assert daily.iloc[0]["cash"] == pytest.approx(0.0)
+    assert daily.iloc[0]["n_held"] == 2               # C excluded
+
+
+def test_prorata_all_negative_stays_in_cash():
+    """No positive score -> hold 100% cash at rf, no book."""
+    market = mk_market([
+        (D1, "AAAA", 0.0, True, True), (D2, "AAAA", 0.0, True, True),
+    ])
+    rf = 0.10
+    scores = mk_scores([(D1, "AAAA", -1.0)])
+    m, daily = simulate_long_only(scores, market, top_n=10, buy_cost_bps=50,
+                                  sell_cost_bps=50, rf_annual=rf, execution_lag=0,
+                                  strategy=STRATEGY_POSITIVE_TOPN_PRORATA)
+    assert daily.iloc[0]["cash"] == pytest.approx(1.0)   # nothing bought
+    assert daily.iloc[0]["cost"] == pytest.approx(0.0)
+    rf_d = (1 + rf) ** (1 / 252) - 1
+    assert daily.iloc[1]["gross"] == pytest.approx(rf_d, rel=1e-6)  # full cash at rf
 
 
 def test_metrics_excess_rf():

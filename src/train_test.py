@@ -19,7 +19,14 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .backtest import compute_metrics, TRADING_DAYS
+from .backtest import (
+    compute_metrics,
+    target_weights,
+    _canon_strategy,
+    TRADING_DAYS,
+    STRATEGY_EQUAL_TOPN,
+    STRATEGY_POSITIVE_TOPN_PRORATA,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -118,6 +125,7 @@ def backtest_long_only(
     sell_cost_bps: float = 25.0,
     rf_annual: float = 0.055,
     period_days: int = 1,
+    strategy: str = STRATEGY_EQUAL_TOPN,
 ):
     """Long-only top-N on the labels in `scores` [date,ticker,score,fwd_return].
 
@@ -126,6 +134,13 @@ def backtest_long_only(
     validation-time model selection, where speed matters and the relative
     ordering of models is what counts.
 
+    `strategy` picks the target book (see backtest.target_weights):
+      long_only_equal_topn            -- legacy: equal-weight top-N, cost from the
+                                         fraction of names replaced (unchanged).
+      long_only_positive_topn_prorata -- positive scores only, pro-rata by score;
+                                         gross = sum_i w_i R_i and cost comes from
+                                         per-ticker weight CHANGES vs the prior book.
+
     `period_days` is the rebalance cadence the score dates were sampled at
     (e.g. 5 for weekly): each row of the result is one PERIOD, and metrics are
     annualized at 252/period_days periods per year.
@@ -133,20 +148,36 @@ def backtest_long_only(
     Returns (metrics: dict, daily: DataFrame).
     """
     buy_c, sell_c = buy_cost_bps / 1e4, sell_cost_bps / 1e4
+    strategy = _canon_strategy(strategy)
     daily = []
-    prev_holdings: set[str] = set()
 
-    for date, day in scores.groupby("date"):
-        picks = day.sort_values("score", ascending=False).head(top_n)
-        held = set(picks["ticker"])
-        simple = np.expm1(picks["fwd_return"].to_numpy())   # log -> simple
-        gross = float(np.mean(simple)) if len(simple) else 0.0
+    if strategy == STRATEGY_EQUAL_TOPN:
+        prev_holdings: set[str] = set()
+        for date, day in scores.groupby("date"):
+            picks = day.sort_values("score", ascending=False).head(top_n)
+            held = set(picks["ticker"])
+            simple = np.expm1(picks["fwd_return"].to_numpy())   # log -> simple
+            gross = float(np.mean(simple)) if len(simple) else 0.0
 
-        # equal-weight book: fraction replaced = one sell leg + one buy leg
-        new_frac = 1.0 if not prev_holdings else len(held - prev_holdings) / max(len(held), 1)
-        cost = new_frac * (buy_c + sell_c)
-        daily.append((date, gross, cost, gross - cost, new_frac))
-        prev_holdings = held
+            # equal-weight book: fraction replaced = one sell leg + one buy leg
+            new_frac = 1.0 if not prev_holdings else len(held - prev_holdings) / max(len(held), 1)
+            cost = new_frac * (buy_c + sell_c)
+            daily.append((date, gross, cost, gross - cost, new_frac))
+            prev_holdings = held
+    else:
+        prev_w: dict[str, float] = {}
+        for date, day in scores.groupby("date"):
+            w = target_weights(day.set_index("ticker")["score"], top_n, strategy)
+            simple = dict(zip(day["ticker"], np.expm1(day["fwd_return"].to_numpy())))
+            gross = float(sum(wi * simple.get(t, 0.0) for t, wi in w.items()))
+            # cost from per-ticker weight changes: buys pay buy_c, sells pay sell_c
+            buys = sum(max(w.get(t, 0.0) - prev_w.get(t, 0.0), 0.0)
+                       for t in set(w) | set(prev_w))
+            sells = sum(max(prev_w.get(t, 0.0) - w.get(t, 0.0), 0.0)
+                        for t in set(w) | set(prev_w))
+            cost = buys * buy_c + sells * sell_c
+            daily.append((date, gross, cost, gross - cost, buys + sells))
+            prev_w = w
 
     d = pd.DataFrame(daily, columns=["date", "gross", "cost", "net", "turnover"]).sort_values("date")
     d["equity"] = (1 + d["net"]).cumprod()
@@ -264,6 +295,7 @@ def train_dlsa(model, train_ds, val_ds, cfg, device="cpu", top_n: int = 10):
     sell_c = cfg.get("sell_cost_bps", 25.0) / 1e4
     rf_annual = cfg.get("rf_annual", 0.055)
     period_days = int(cfg.get("period_days", 1))
+    strategy = cfg.get("strategy", STRATEGY_EQUAL_TOPN)
     rf_d = (1.0 + rf_annual) ** (period_days / TRADING_DAYS) - 1.0  # rf per period
     ann = TRADING_DAYS / period_days                                # periods per year
     patience = cfg.get("early_stop_patience", 8)
@@ -334,7 +366,7 @@ def train_dlsa(model, train_ds, val_ds, cfg, device="cpu", top_n: int = 10):
         val_sharpe = _eval_topn_net_sharpe(
             model, val_ds, device, top_n=top_n,
             buy_cost_bps=buy_c * 1e4, sell_cost_bps=sell_c * 1e4, rf_annual=rf_annual,
-            period_days=period_days,
+            period_days=period_days, strategy=strategy,
         )
         print(f"epoch {epoch:03d} | train_loss {np.mean(losses):.4f} | "
               f"val_topN_net_sharpe {val_sharpe:.4f} | {time.perf_counter() - t_ep:.1f}s")
@@ -353,14 +385,18 @@ def train_dlsa(model, train_ds, val_ds, cfg, device="cpu", top_n: int = 10):
 
 
 def _eval_topn_net_sharpe(model, ds, device, top_n, buy_cost_bps, sell_cost_bps, rf_annual,
-                          period_days=1):
-    """Validation metric: net Sharpe of the traded rule (top-N after costs)."""
+                          period_days=1, strategy=STRATEGY_EQUAL_TOPN):
+    """Validation metric: net Sharpe of the traded rule (top-N after costs).
+
+    Uses the SAME portfolio `strategy` as the final backtest, so model selection
+    optimizes the rule we actually trade.
+    """
     if len(ds) == 0:
         return 0.0
     scores = predict_scores_cs(model, ds, device=device)
     m, _ = backtest_long_only(
         scores, top_n=top_n,
         buy_cost_bps=buy_cost_bps, sell_cost_bps=sell_cost_bps, rf_annual=rf_annual,
-        period_days=period_days,
+        period_days=period_days, strategy=strategy,
     )
     return float(m.get("sharpe", 0.0))

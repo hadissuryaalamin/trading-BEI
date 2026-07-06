@@ -66,7 +66,8 @@ costs:
   max_half_spread_bps: 200
 
 portfolio:
-  strategy: long_only
+  # long_only_equal_topn | long_only_positive_topn_prorata (needs allow_cash: true)
+  strategy: long_only_equal_topn
   top_n: 10
   rebalance_every: 5         # trade only every 5th trading day (weekly cadence)
   delist_after: 20

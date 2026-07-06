@@ -143,6 +143,8 @@ def _train_one_fold(cfg, fold, feats, active, device):
         "sell_cost_bps": ccfg.get("train_sell_bps", ccfg.get("sell_bps", 25.0)),
         "rf_annual": ccfg.get("rf_annual", 0.055),
         "period_days": rebalance_every,
+        # validation model-selection uses the SAME portfolio rule as the backtest
+        "strategy": cfg.get("portfolio", {}).get("strategy", "long_only_equal_topn"),
     }
     per_day = objective == "sharpe" or model_name == "cross_sectional"
     top_n = cfg.get("portfolio", {}).get("top_n", 10)
@@ -203,6 +205,16 @@ def run(config_path: str, overrides: dict | None = None) -> dict:
     folds = make_folds(cfg["split"], cfg["data"].get("end") or feats["date"].max())
     print(f"model={model_name} | objective={objective} | folds={len(folds)}")
 
+    # Portfolio rule shared by validation model-selection and the final backtest.
+    strategy = cfg.get("portfolio", {}).get("strategy", "long_only_equal_topn")
+    if (strategy == "long_only_positive_topn_prorata"
+            and not cfg.get("train", {}).get("allow_cash", False)):
+        # "score > 0" is only meaningful vs the cash anchor, which exists only
+        # when train_dlsa adds the fixed-0 cash logit (allow_cash: true).
+        print("WARNING: strategy 'long_only_positive_topn_prorata' assumes "
+              "train.allow_cash: true (score>0 == above the cash anchor); "
+              "allow_cash is false, so the score>0 threshold is not anchored.")
+
     all_scores = []
     for k, fold in enumerate(folds):
         print(f"\n--- fold {k + 1}/{len(folds)}: train<= {fold['train_end'].date()} | "
@@ -230,6 +242,7 @@ def run(config_path: str, overrides: dict | None = None) -> dict:
         execution_lag=execution_lag,
         default_half_spread_bps=ccfg.get("default_half_spread_bps", 35.0),
         max_half_spread_bps=ccfg.get("max_half_spread_bps", 200.0),
+        strategy=strategy,
     )
     metrics["execution_lag"] = execution_lag
     # --- benchmark vs IHSG buy-and-hold over the SAME dates (long-only beta) ---

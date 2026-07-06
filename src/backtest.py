@@ -34,6 +34,62 @@ import pandas as pd
 
 TRADING_DAYS = 252
 
+# Portfolio strategies understood by target_weights / the backtests.
+STRATEGY_EQUAL_TOPN = "long_only_equal_topn"
+STRATEGY_POSITIVE_TOPN_PRORATA = "long_only_positive_topn_prorata"
+# Pre-existing configs used the bare name; keep it as an equal-weight alias.
+STRATEGY_LEGACY_ALIAS = "long_only"
+
+
+def _canon_strategy(strategy: str) -> str:
+    return STRATEGY_EQUAL_TOPN if strategy == STRATEGY_LEGACY_ALIAS else strategy
+
+
+def target_weights(
+    scores: pd.Series, top_n: int, strategy: str = STRATEGY_EQUAL_TOPN
+) -> dict[str, float]:
+    """Map a day's ticker->score into target portfolio weights.
+
+    Pure and stateless: no costs, no tradability, no drift -- just the target
+    book the strategy WANTS today. Weights are fractions of the invested book
+    and sum to 1.0 when non-empty; an empty dict means "hold 100% cash".
+
+    Strategies
+    ----------
+    long_only_equal_topn (default, legacy):
+        the top-`top_n` names by score, equal weight (1/n). Kept for backward
+        compatibility; the production equal-weight paths in the backtests do
+        NOT route through here (they preserve their own conventions), so this
+        branch exists mainly for dispatch and tests.
+
+    long_only_positive_topn_prorata:
+        keep only names with score > 0, take the highest `top_n` of those, and
+        weight them PRO-RATA by score (w_i = score_i / sum score_j). Returns {}
+        when no score is positive -> the day is spent in cash. Here "score > 0"
+        means "above the cash anchor" (train_dlsa's allow_cash logit is fixed at
+        0), NOT a predicted positive return -- see configs/README.md.
+    """
+    if scores is None or len(scores) == 0:
+        return {}
+    strategy = _canon_strategy(strategy)
+    s = scores[np.isfinite(scores)].sort_values(ascending=False)
+
+    if strategy == STRATEGY_EQUAL_TOPN:
+        picks = s.head(top_n)
+        if len(picks) == 0:
+            return {}
+        w = 1.0 / len(picks)
+        return {str(t): w for t in picks.index}
+
+    if strategy == STRATEGY_POSITIVE_TOPN_PRORATA:
+        pos = s[s > 0].head(top_n)
+        total = float(pos.sum())
+        if len(pos) == 0 or total <= 0:
+            return {}
+        return {str(t): float(v) / total for t, v in pos.items()}
+
+    raise ValueError(f"unknown portfolio strategy: {strategy!r}")
+
 
 def simulate_long_only(
     scores: pd.DataFrame,
@@ -47,8 +103,13 @@ def simulate_long_only(
     execution_lag: int = 1,
     default_half_spread_bps: float = 35.0,
     max_half_spread_bps: float = 200.0,
+    strategy: str = STRATEGY_EQUAL_TOPN,
 ) -> tuple[dict, pd.DataFrame]:
     """Run the simulator. scores: [date, ticker, score]; market: see build_market.
+
+    `strategy` selects the target book each rebalance (see target_weights):
+    the legacy equal-weight top-N (default) or positive-score top-N pro-rata.
+    Both share the same tradability / stuck / delisting / cost machinery below.
 
     Scores dated t are executed at the close `execution_lag` trading days
     later (on the market calendar). Spread costs come from the market's
@@ -140,13 +201,20 @@ def simulate_long_only(
         cost = turnover = 0.0
         if d in score_by_day:
             g = score_by_day[d]
-            ranked = g.sort_values("score", ascending=False)["ticker"]
-            target = []
-            for t in ranked:
-                if t in can_buy:
-                    target.append(t)
-                if len(target) == top_n:
-                    break
+            # Only names we can actually BUY today are eligible for the target.
+            buyable = g[g["ticker"].isin(can_buy)]
+            if strategy == STRATEGY_POSITIVE_TOPN_PRORATA:
+                # pro-rata weights among positive scores (empty -> all cash)
+                tw = target_weights(
+                    buyable.set_index("ticker")["score"], top_n, strategy
+                )
+                target = list(tw)                       # score-desc order
+            else:
+                # legacy equal-weight top-N: split the investable book 1/top_n,
+                # so an underfilled book leaves the remainder in cash (unchanged).
+                ranked = buyable.sort_values("score", ascending=False)["ticker"]
+                target = list(ranked.head(top_n))
+                tw = None
             target_set = set(target)
 
             # exits: sell what we can; what we can't sell stays (stuck)
@@ -159,12 +227,13 @@ def simulate_long_only(
                     cost += sold * (sell_c + hs(t))
                     turnover += sold
             stuck_w = sum(v for t, v in w.items() if t not in target_set)
+            avail = max(0.0, 1.0 - stuck_w)             # capital free to deploy
 
-            # equal-weight the target book with whatever isn't stuck
-            w_star = max(0.0, 1.0 - stuck_w) / top_n
+            # move each target name to its weight (pro-rata * avail, or 1/top_n)
             for t in target:
+                w_target = avail * tw[t] if tw is not None else avail / top_n
                 cur = w.get(t, 0.0)
-                delta = w_star - cur
+                delta = w_target - cur
                 if delta > 1e-12:
                     buy = min(delta, max(cash, 0.0))
                     if buy > 0:
@@ -173,7 +242,7 @@ def simulate_long_only(
                         cost += buy * (buy_c + hs(t))
                         turnover += buy
                 elif delta < -1e-12 and t in can_sell:
-                    w[t] = w_star
+                    w[t] = w_target
                     cash += -delta
                     cost += -delta * (sell_c + hs(t))
                     turnover += -delta
