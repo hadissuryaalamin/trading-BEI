@@ -1,0 +1,1116 @@
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+
+\title{Rangkuman Alur Trading-BEI: Dari Return sampai Output Backtest}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section*{Gambaran Umum}
+
+Repo \texttt{trading-BEI} membangun strategi long-only untuk saham BEI/IDX.
+Alurnya secara besar adalah:
+
+\[
+\text{data saham}
+\rightarrow
+\text{fitur}
+\rightarrow
+\text{model}
+\rightarrow
+\text{score}
+\rightarrow
+\text{portfolio}
+\rightarrow
+\text{return}
+\rightarrow
+\text{metrics}
+\]
+
+Strategi portfolio baru yang dibahas adalah:
+
+\[
+\boxed{
+score > 0
+\rightarrow
+\text{ambil Top-N}
+\rightarrow
+\text{bobot pro-rata berdasarkan score}
+}
+\]
+
+\section{Return}
+
+Return adalah perubahan harga saham.
+
+Jika harga naik dari 2.000 ke 2.100, maka:
+
+\[
+R_t = \frac{2100}{2000} - 1 = 0.05 = 5\%
+\]
+
+Di repo, return harian tidak dihitung langsung dari \texttt{close\_t / close\_{t-1}},
+tetapi dari:
+
+\[
+\boxed{
+R_t = \frac{close_t}{prev\_close_t} - 1
+}
+\]
+
+\texttt{prev\_close} dipakai karena IDX menyediakan harga pembanding yang sudah
+disesuaikan untuk corporate action seperti stock split.
+
+\section{Log Return}
+
+Return biasa disebut simple return:
+
+\[
+R_t = \frac{close_t}{prev\_close_t} - 1
+\]
+
+Di repo, return juga dinyatakan sebagai log return:
+
+\[
+\boxed{
+r_t = \log\left(\frac{close_t}{prev\_close_t}\right)
+}
+\]
+
+Contoh:
+
+\[
+r_t = \log\left(\frac{2100}{2000}\right)
+= \log(1.05)
+\approx 0.0488
+\]
+
+Kelebihan log return adalah bisa dijumlahkan antar periode.
+
+Misal:
+
+\[
+\log\left(\frac{P_1}{P_0}\right)
++
+\log\left(\frac{P_2}{P_1}\right)
+=
+\log\left(\frac{P_2}{P_0}\right)
+\]
+
+\section{Adjusted Log Price Path}
+
+Adjusted log price path adalah akumulasi log return.
+
+\[
+\boxed{
+A_t = \sum_{u \leq t} r_u
+}
+\]
+
+Contoh:
+
+\[
+A_3 = r_1 + r_2 + r_3
+\]
+
+Gunanya adalah untuk menghitung return dari hari masuk ke hari keluar:
+
+\[
+\boxed{
+y = A_{exit} - A_{entry}
+}
+\]
+
+Jadi kalau:
+
+\[
+A_{entry}=0.01,
+\qquad
+A_{exit}=0.04
+\]
+
+maka:
+
+\[
+y = 0.04 - 0.01 = 0.03
+\]
+
+Artinya log return sekitar 3\%.
+
+\section{Target \texorpdfstring{$y$}{y}}
+
+Target adalah jawaban benar yang dipakai untuk melatih model.
+
+Untuk saham \(i\) di hari \(t\), target ditulis:
+
+\[
+y_{t,i}
+\]
+
+Artinya:
+
+\[
+\text{return masa depan saham } i
+\]
+
+Dengan konfigurasi:
+
+\[
+execution\_lag = 1
+\]
+
+dan:
+
+\[
+horizon = 1
+\]
+
+model melihat data sampai hari \(t\), lalu baru bisa beli di hari \(t+1\).
+Return target dihitung dari hari \(t+1\) sampai \(t+2\):
+
+\[
+\boxed{
+y_{t,i} = A_{t+2,i} - A_{t+1,i}
+}
+\]
+
+Jika \texttt{horizon = 5}, maka:
+
+\[
+\boxed{
+y_{t,i} = A_{t+6,i} - A_{t+1,i}
+}
+\]
+
+Intinya:
+
+\[
+\boxed{
+y = \text{return masa depan yang benar-benar terjadi}
+}
+\]
+
+\section{Input Model \texorpdfstring{$X$}{X}}
+
+Model tidak melihat masa depan. Model hanya melihat data masa lalu sampai hari \(t\).
+
+Jika:
+
+\[
+lookback = 60
+\]
+
+maka input model adalah:
+
+\[
+\boxed{
+X_{t,i} = \text{fitur saham } i \text{ dari } t-59 \text{ sampai } t
+}
+\]
+
+Contoh kalau hari ini hari ke-60:
+
+\[
+X_{60} = \text{hari 1 sampai 60}
+\]
+
+Jika \texttt{execution\_lag = 1} dan \texttt{horizon = 5}, maka targetnya:
+
+\[
+y_{60} = A_{66} - A_{61}
+\]
+
+Bukan:
+
+\[
+X = \text{hari 7 sampai 66}
+\]
+
+karena hari 61 sampai 66 belum terjadi pada hari ke-60.
+Kalau model melihat data sampai hari 66, itu disebut \textit{look-ahead bias}.
+
+\[
+\boxed{
+X = \text{masa lalu}
+\qquad
+y = \text{masa depan}
+}
+\]
+
+\section{Model Menghasilkan Score}
+
+Model menerima input:
+
+\[
+X_{t,i}
+\]
+
+lalu menghasilkan score:
+
+\[
+\boxed{
+score_{t,i} = f_\theta(X_{t,i})
+}
+\]
+
+Makna score:
+
+\[
+\boxed{
+\text{score tinggi} = \text{saham lebih menarik menurut model}
+}
+\]
+
+\[
+\boxed{
+\text{score rendah} = \text{saham kurang menarik menurut model}
+}
+\]
+
+Model tidak langsung mengeluarkan keputusan beli atau jual.
+Model hanya memberi angka score untuk setiap saham.
+
+\section{Dari Score Menjadi Pilihan Saham}
+
+Rule portfolio baru:
+
+\[
+\boxed{
+score > 0
+\rightarrow
+\text{ambil Top-N}
+\rightarrow
+\text{bobot pro-rata}
+}
+\]
+
+Misal:
+
+\[
+top\_n = 3
+\]
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+Saham & Score \\
+\midrule
+BBCA & 0.8 \\
+TLKM & 0.3 \\
+ASII & 0.1 \\
+GOTO & -0.2 \\
+BUKA & -0.5 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Yang memenuhi \(score > 0\):
+
+\[
+BBCA,\ TLKM,\ ASII
+\]
+
+Total score positif:
+
+\[
+0.8 + 0.3 + 0.1 = 1.2
+\]
+
+Bobot:
+
+\[
+w_{BBCA} = \frac{0.8}{1.2}=66.7\%
+\]
+
+\[
+w_{TLKM} = \frac{0.3}{1.2}=25\%
+\]
+
+\[
+w_{ASII} = \frac{0.1}{1.2}=8.3\%
+\]
+
+Rumus umumnya:
+
+\[
+\boxed{
+w_i =
+\frac{score_i}
+{\sum_{j \in P_t} score_j}
+}
+\]
+
+dengan \(P_t\) adalah saham positif yang masuk Top-N.
+
+Jika tidak ada saham dengan \(score > 0\), maka:
+
+\[
+\boxed{
+100\% \text{ cash}
+}
+\]
+
+\section{Dari Bobot Menjadi Portfolio Return}
+
+Setelah saham dipilih, portfolio punya bobot:
+
+\[
+w_i
+\]
+
+Setiap saham punya return asli:
+
+\[
+R_i
+\]
+
+Portfolio return dihitung sebagai:
+
+\[
+\boxed{
+R_p = \sum_i w_i R_i
+}
+\]
+
+Contoh:
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+Saham & Bobot & Return Asli \\
+\midrule
+BBCA & 66.7\% & 2\% \\
+TLKM & 25.0\% & -1\% \\
+ASII & 8.3\% & 4\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Maka:
+
+\[
+R_p =
+(0.667)(0.02)
++
+(0.25)(-0.01)
++
+(0.083)(0.04)
+\]
+
+\[
+R_p = 0.01416 = 1.416\%
+\]
+
+\section{Transaction Cost}
+
+Return sebelum biaya disebut gross return.
+
+\[
+R_{gross} = R_p
+\]
+
+Repo memakai biaya seperti:
+
+\[
+buy\_bps = 15
+\qquad
+sell\_bps = 25
+\]
+
+Artinya:
+
+\[
+buy = 0.15\%
+\]
+
+\[
+sell = 0.25\%
+\]
+
+Jika buy turnover:
+
+\[
+0.8
+\]
+
+dan sell turnover:
+
+\[
+0.3
+\]
+
+maka cost:
+
+\[
+cost = 0.8(0.15\%) + 0.3(0.25\%)
+\]
+
+\[
+cost = 0.12\% + 0.075\% = 0.195\%
+\]
+
+Net return:
+
+\[
+\boxed{
+R_{net} = R_{gross} - cost
+}
+\]
+
+Contoh:
+
+\[
+R_{net} = 1.416\% - 0.195\% = 1.221\%
+\]
+
+\section{Sharpe Ratio}
+
+Sharpe mengukur return dibanding risiko.
+
+Rumus sederhananya:
+
+\[
+Sharpe =
+\frac{
+mean(R_{net}) - r_f
+}{
+std(R_{net})
+}
+\]
+
+Di repo, Sharpe di-annualized:
+
+\[
+\boxed{
+Sharpe =
+\frac{
+mean(R_{net}) - r_f
+}{
+std(R_{net}) + \epsilon
+}
+\sqrt{252}
+}
+\]
+
+Di sini \(r_f\) adalah risk-free rate \emph{per hari} (bukan per tahun), dan
+Sharpe dihitung atas \emph{excess return} \(R_{net} - r_f\). Faktor \(\sqrt{252}\)
+berlaku untuk rebalance harian; untuk cadence lain (mingguan/bulanan dengan
+\texttt{rebalance\_every} = 5/21) faktornya \(\sqrt{252/\text{period\_days}}\),
+yaitu akar dari jumlah periode per tahun.
+
+Maknanya:
+
+\begin{itemize}[leftmargin=*]
+    \item return rata-rata tinggi membuat Sharpe naik;
+    \item volatilitas tinggi membuat Sharpe turun;
+    \item strategi yang stabil untung biasanya punya Sharpe lebih baik.
+\end{itemize}
+
+\section{Objective / Loss Model}
+
+Tujuan model adalah membuat Sharpe setinggi mungkin.
+
+Tetapi optimizer di machine learning biasanya meminimalkan loss.
+Maka loss dibuat:
+
+\[
+\boxed{
+loss = -Sharpe
+}
+\]
+
+Jika Sharpe naik, loss turun.
+
+\begin{center}
+\begin{tabular}{rr}
+\toprule
+Sharpe & Loss \\
+\midrule
+0.5 & -0.5 \\
+1.0 & -1.0 \\
+2.0 & -2.0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Jadi model dilatih untuk:
+
+\[
+\boxed{
+\text{memaksimalkan net Sharpe}
+}
+\]
+
+\section{Backpropagation}
+
+Setelah loss dihitung, model diperbaiki dengan backpropagation.
+
+Model punya parameter:
+
+\[
+\theta
+\]
+
+Training melakukan:
+
+\[
+loss
+\rightarrow
+gradient
+\rightarrow
+update\ \theta
+\]
+
+Secara konsep:
+
+\[
+\boxed{
+\theta_{baru}
+=
+\theta_{lama}
+-
+\text{learning rate} \times \text{gradient}
+}
+\]
+
+Alur training:
+
+\[
+X
+\rightarrow
+model
+\rightarrow
+score
+\rightarrow
+portfolio
+\rightarrow
+net\ return
+\rightarrow
+Sharpe
+\rightarrow
+loss
+\rightarrow
+update\ model
+\]
+
+Intinya:
+
+\[
+\boxed{
+\text{model belajar dari hasil portfolio, bukan hanya dari prediksi satu saham}
+}
+\]
+
+\section{Training Portfolio vs Real Trading Rule}
+
+Saat training, repo memakai softmax agar bisa dihitung gradient-nya.
+
+\[
+\boxed{
+w_i =
+\frac{e^{score_i/\tau}}
+{\sum_j e^{score_j/\tau}}
+}
+\]
+
+Softmax membuat score menjadi bobot yang smooth.
+
+Saat backtest/trading rule, strategi memakai rule asli:
+
+\[
+\boxed{
+score > 0
+\rightarrow
+\text{Top-N}
+\rightarrow
+\text{pro-rata}
+}
+\]
+
+Jadi ada perbedaan:
+
+\[
+\text{training} = \text{softmax}
+\]
+
+\[
+\text{backtest} = \text{positive Top-N pro-rata}
+\]
+
+Ini adalah mismatch, tetapi bukan bug.
+Alasannya: Top-N dan filter \(score>0\) tidak smooth, sehingga sulit untuk backpropagation.
+
+Mismatch ini dikurangi dengan:
+
+\begin{itemize}[leftmargin=*]
+    \item softmax temperature kecil, sehingga softmax lebih tajam;
+    \item \texttt{allow\_cash = true}, sehingga cash punya logit tetap 0;
+    \item model selection memakai rule trading asli.
+\end{itemize}
+
+\section{Arti \texorpdfstring{$score > 0$}{score > 0}}
+
+Untuk model Sharpe-softmax, \(score > 0\) bukan berarti prediksi return positif.
+
+Maknanya adalah:
+
+\[
+\boxed{
+\text{score saham} > \text{score cash}
+}
+\]
+
+Karena cash punya logit:
+
+\[
+s_{cash}=0
+\]
+
+Maka \(score > 0\) berarti saham dianggap lebih menarik daripada cash anchor.
+
+Namun, jika model dilatih dengan objective regression/MSE, maka score bisa lebih dekat
+maknanya ke prediksi return.
+
+\section{Validation / Model Selection}
+
+Training berjalan beberapa epoch.
+
+Contoh:
+
+\[
+epoch = 1,2,3,\ldots,50
+\]
+
+Setiap epoch menghasilkan model berbeda.
+
+Model yang dipakai bukan selalu epoch terakhir, tetapi model dengan validation Sharpe terbaik.
+
+Contoh:
+
+\begin{center}
+\begin{tabular}{rr}
+\toprule
+Epoch & Validation Sharpe \\
+\midrule
+1 & 0.4 \\
+2 & 0.8 \\
+3 & 0.6 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Model yang dipilih adalah epoch 2 karena Sharpe validation paling tinggi.
+
+Catatan penting: validation Sharpe di sini dihitung dengan \emph{quick backtest}
+yang frictionless --- memakai rule portfolio yang sama (mis. positive Top-N
+pro-rata), tetapi \textbf{tanpa} ARA/ARB, spread, suspension, maupun delisting.
+Aturan tradability penuh baru diterapkan di realistic backtest saat evaluasi
+akhir. Jadi yang "sama" antara validation dan evaluasi adalah \emph{rule
+portfolio}-nya, bukan keseluruhan simulasi pasar.
+
+Intinya:
+
+\[
+\boxed{
+\text{training belajar pakai softmax, tetapi model dipilih pakai rule trading asli}
+}
+\]
+
+\section{Realistic Backtest}
+
+Setelah model dipilih, model diuji di test set / out-of-sample.
+
+Realistic backtest mensimulasikan kondisi trading yang lebih dekat dengan IDX.
+
+Hal-hal yang diperhitungkan:
+
+\begin{enumerate}[leftmargin=*]
+    \item \textbf{Execution lag}:
+    signal dari hari \(t\), beli di hari \(t+1\).
+    \item \textbf{ARA}:
+    tidak bisa beli jika tidak ada offer.
+    \item \textbf{ARB}:
+    tidak bisa jual jika tidak ada bid.
+    \item \textbf{Suspension}:
+    posisi tetap ada, tidak dihapus.
+    \item \textbf{Delisting}:
+    posisi bisa kena write-down.
+    \item \textbf{Transaction cost dan spread}:
+    biaya beli, biaya jual, dan bid-ask spread dihitung.
+\end{enumerate}
+
+Alurnya:
+
+\[
+score
+\rightarrow
+pilih\ saham
+\rightarrow
+cek\ bisa\ beli
+\rightarrow
+beli
+\rightarrow
+hitung\ return
+\rightarrow
+cek\ bisa\ jual
+\rightarrow
+hitung\ cost
+\rightarrow
+net\ return
+\]
+
+\section{Metrics Utama}
+
+Setelah backtest, repo menghasilkan metrics.
+
+\subsection{Annual Return}
+
+\[
+ann\_return
+\]
+
+Artinya return tahunan strategi.
+
+Jika:
+
+\[
+ann\_return = 0.18
+\]
+
+maka strategi menghasilkan sekitar:
+
+\[
+18\% \text{ per tahun}
+\]
+
+\subsection{Annual Volatility}
+
+\[
+ann\_vol
+\]
+
+Artinya volatilitas tahunan.
+
+Volatilitas tinggi berarti return lebih naik-turun.
+
+\subsection{Sharpe}
+
+Sharpe mengukur return dibanding risiko.
+
+\[
+\boxed{
+\text{Sharpe tinggi} = \text{strategi lebih efisien}
+}
+\]
+
+\subsection{Max Drawdown}
+
+Max drawdown adalah penurunan terbesar dari puncak ke bawah.
+
+Contoh equity:
+
+\[
+100 \rightarrow 130 \rightarrow 90
+\]
+
+Drawdown:
+
+\[
+\frac{90}{130} - 1 = -30.8\%
+\]
+
+Jika:
+
+\[
+max\_drawdown = -0.35
+\]
+
+artinya strategi pernah turun 35\% dari puncak.
+
+\section{Metrics Lanjutan}
+
+\subsection{Turnover}
+
+Turnover mengukur seberapa banyak portfolio berubah.
+
+\[
+\boxed{
+\text{turnover tinggi} = \text{sering beli/jual}
+}
+\]
+
+Turnover tinggi bisa membuat cost tinggi.
+
+\subsection{Cost}
+
+Cost adalah biaya transaksi.
+
+\[
+cost = buy\ cost + sell\ cost + spread
+\]
+
+Jika cost tinggi:
+
+\[
+R_{net} \downarrow
+\]
+
+\subsection{Cash}
+
+Cash adalah modal yang tidak dibelikan saham.
+
+Dalam rule baru, cash muncul jika:
+
+\[
+\text{tidak ada saham dengan } score > 0
+\]
+
+atau saham yang memenuhi constraint tidak bisa dibeli.
+
+\subsection{\texorpdfstring{$n\_stuck$}{n\_stuck}}
+
+\[
+n\_stuck
+\]
+
+adalah jumlah saham yang nyangkut.
+
+Contoh: model ingin jual, tetapi saham terkena ARB atau suspend sehingga tidak bisa dijual.
+
+\section{Compare vs IHSG}
+
+Karena strategi ini long-only saham Indonesia, benchmark yang masuk akal adalah IHSG.
+
+Pertanyaannya bukan hanya:
+
+\[
+\text{strategi untung atau tidak?}
+\]
+
+Tetapi:
+
+\[
+\boxed{
+\text{strategi mengalahkan IHSG atau tidak?}
+}
+\]
+
+Jika:
+
+\[
+ann\_return_{strategy} = 18\%
+\]
+
+dan:
+
+\[
+ann\_return_{IHSG} = 12\%
+\]
+
+maka strategi lebih tinggi:
+
+\[
+18\% - 12\% = 6\%
+\]
+
+dan:
+
+\[
+beats\_ihsg = True
+\]
+
+Kalau strategi return 8\% dan IHSG return 12\%, maka:
+
+\[
+beats\_ihsg = False
+\]
+
+\section{File Output}
+
+Setelah backtest selesai, repo menyimpan hasil di:
+
+\[
+\texttt{results/<experiment\_name>/}
+\]
+
+File utama:
+
+\begin{enumerate}[leftmargin=*]
+    \item \texttt{metrics.json}
+    \item \texttt{daily\_returns.csv}
+    \item \texttt{test\_scores.csv}
+    \item \texttt{equity\_vs\_ihsg.png}
+\end{enumerate}
+
+\subsection{\texttt{test\_scores.csv}}
+
+Berisi score model untuk saham di periode test.
+
+Contoh isi:
+
+\begin{center}
+\begin{tabular}{llrr}
+\toprule
+date & ticker & score & fwd\_return \\
+\midrule
+2025-01-01 & BBCA & 0.8 & 0.02 \\
+2025-01-01 & TLKM & 0.3 & -0.01 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+File ini dipakai untuk menentukan portfolio:
+
+\[
+score > 0
+\rightarrow
+TopN
+\rightarrow
+pro\ rata
+\]
+
+\subsection{\texttt{daily\_returns.csv}}
+
+Berisi hasil simulasi portfolio harian.
+
+Contoh:
+
+\begin{center}
+\begin{tabular}{lrrrrr}
+\toprule
+date & gross & cost & net & turnover & cash \\
+\midrule
+2025-01-01 & 0.012 & 0.002 & 0.010 & 0.8 & 0.0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Hubungannya:
+
+\[
+\boxed{
+net = gross - cost
+}
+\]
+
+\subsection{\texttt{metrics.json}}
+
+Berisi ringkasan performa akhir.
+
+Contoh:
+
+\[
+ann\_return = 0.18
+\]
+
+\[
+Sharpe = 1.2
+\]
+
+\[
+max\_drawdown = -0.15
+\]
+
+\[
+beats\_ihsg = True
+\]
+
+Ini file paling cepat untuk melihat apakah strategi bagus atau tidak.
+
+\subsection{\texttt{equity\_vs\_ihsg.png}}
+
+Grafik yang membandingkan:
+
+\[
+equity\ strategi
+\]
+
+dengan:
+
+\[
+IHSG
+\]
+
+Dari grafik ini bisa dilihat apakah strategi benar-benar mengalahkan market.
+
+\section*{Ringkasan Akhir}
+
+Alur lengkapnya:
+
+\[
+close,\ prev\_close
+\rightarrow
+return
+\rightarrow
+log\ return
+\rightarrow
+A_t
+\rightarrow
+X,y
+\rightarrow
+model
+\rightarrow
+score
+\rightarrow
+portfolio
+\rightarrow
+gross\ return
+\rightarrow
+cost
+\rightarrow
+net\ return
+\rightarrow
+Sharpe
+\rightarrow
+loss
+\rightarrow
+training
+\rightarrow
+backtest
+\rightarrow
+metrics
+\]
+
+Strategi baru:
+
+\[
+\boxed{
+score > 0
+\rightarrow
+\text{Top-N}
+\rightarrow
+\text{pro-rata}
+\rightarrow
+\text{cash jika kosong}
+}
+\]
+
+Makna penting:
+
+\[
+\boxed{
+score > 0
+\neq
+\text{prediksi return positif}
+}
+\]
+
+Untuk training Sharpe dengan \texttt{allow\_cash=true}, maknanya adalah:
+
+\[
+\boxed{
+\text{score saham} > \text{score cash}
+}
+\]
+
+\end{document}
