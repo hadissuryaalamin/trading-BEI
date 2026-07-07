@@ -1,0 +1,66 @@
+# MODERATE run, cell 2/2: monthly cadence, equal top-N.
+# Copy of cross_sectional_monthly.yaml (see that file for the cadence rationale).
+experiment_name: moderate_monthly
+seed: 42
+
+data:
+  panel: data/processed/panel.parquet
+  start: 2020-07-01
+  end: 2026-07-02
+
+universe:
+  min_value_idr: 1_000_000_000
+  window: 20
+
+split:
+  mode: walk_forward
+  walk_forward:
+    test_start: 2024-07-01
+    step_months: 6
+    val_months: 6
+
+features:
+  feature_groups: [G1, G2, G3, G4, G5]
+  normalize: cross_sectional_zscore
+
+window:
+  lookback: 60
+  horizon: 21                # label = close(t+1) -> close(t+22)
+  execution_lag: 1
+
+model:
+  name: cross_sectional
+  d_model: 64
+  n_heads: 4
+  temporal_layers: 2
+  cross_layers: 2
+  dim_ff: 128
+  dropout: 0.1
+  pooling: last
+
+train:
+  epochs: 40
+  batch_size: 1
+  lr: 0.0003
+  weight_decay: 0.00001
+  early_stop_patience: 8
+  objective: sharpe
+  days_per_step: 12
+  softmax_temp: 0.1
+  allow_cash: true
+
+costs:
+  buy_bps: 15
+  sell_bps: 25
+  train_buy_bps: 60
+  train_sell_bps: 70
+  rf_annual: 0.055
+  default_half_spread_bps: 35
+  max_half_spread_bps: 200
+
+portfolio:
+  strategy: long_only_equal_topn
+  top_n: 10
+  rebalance_every: 21
+  delist_after: 20
+  delist_return: -0.5

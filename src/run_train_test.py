@@ -223,8 +223,14 @@ def run(config_path: str, overrides: dict | None = None) -> dict:
         set_seed(seed)  # identical init per fold -> differences come from data
         scores_k = _train_one_fold(cfg, fold, feats, active, device)
         print(f"fold {k + 1}: {scores_k['date'].nunique()} test days, {len(scores_k):,} scores")
-        all_scores.append(scores_k)
+        if len(scores_k):
+            all_scores.append(scores_k)  # skip a degenerate fold (e.g. a trailing sliver with 0 trading days)
+    if not all_scores:
+        raise RuntimeError("no out-of-sample scores across all folds -- check split dates vs data end")
     scores = pd.concat(all_scores, ignore_index=True).sort_values(["date", "ticker"])
+    # an empty fold arrives as object-dtype columns and would poison the concat; keep scores numeric
+    scores["score"] = pd.to_numeric(scores["score"], errors="coerce")
+    scores["fwd_return"] = pd.to_numeric(scores["fwd_return"], errors="coerce")
 
     # --- realistic backtest over the stitched out-of-sample scores ---
     pcfg = cfg.get("portfolio", {})
